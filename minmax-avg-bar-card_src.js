@@ -749,9 +749,9 @@ class MinMaxAvgBarCard extends LitElement {
             ${isHoverValid ? html`
               <div class="tooltip" style="left:${hover.px}px; top:${hover.py}px">
                 <div class="tt-title">${ttTitle}</div>
-                <div class="tt-row"><span class="k">${i18n.min}</span><span class="v">${fmtVal(hoverPoint.min)}${unit ? ` ${unit}` : ""}</span></div>
-                <div class="tt-row"><span class="k">${i18n.avg}</span><span class="v">${fmtVal(hoverPoint.mean)}${unit ? ` ${unit}` : ""}</span></div>
                 <div class="tt-row"><span class="k">${i18n.max}</span><span class="v">${fmtVal(hoverPoint.max)}${unit ? ` ${unit}` : ""}</span></div>
+                <div class="tt-row"><span class="k">${i18n.avg}</span><span class="v">${fmtVal(hoverPoint.mean)}${unit ? ` ${unit}` : ""}</span></div>
+                <div class="tt-row"><span class="k">${i18n.min}</span><span class="v">${fmtVal(hoverPoint.min)}${unit ? ` ${unit}` : ""}</span></div>
               </div>
             ` : nothing}
           </div>
