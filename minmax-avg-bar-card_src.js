@@ -52,6 +52,14 @@ const PRESETS = {
     { lt: 30,  color: "#fb8c00" }, // orange
     { lt: 999, color: "#e53935" }, // red
   ],
+  temperature_f: [
+    { lt: 5,   color: "#b968f4" }, // purple (very cold)
+    { lt: 32,  color: "#039be5" }, // blue (freezing)
+    { lt: 68,  color: "#43a047" }, // green (comfortable)
+    { lt: 77,  color: "#fdd835" }, // yellow (warm)
+    { lt: 86,  color: "#fb8c00" }, // orange (hot)
+    { lt: 999, color: "#e53935" }, // red (very hot)
+  ],
   beaufort: [
     { lt: 1,   color: "#2196F3" }, // 0: Calm
     { lt: 5,   color: "#64B5F6" }, // 1: Light Air
@@ -94,8 +102,16 @@ const addMonths = (d, n) => {
     return copy;
 };
 
-function formatDateDM(d) { return `${d.getDate()}. ${d.getMonth() + 1}.`; }
-function formatDateDMY(d) { return `${d.getDate()}. ${d.getMonth() + 1}. ${d.getFullYear()}`; }
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function formatDateDM(d, fmt = 'eu') {
+  if (fmt === 'intl') return `${d.getDate()}-${MONTH_ABBR[d.getMonth()]}`;
+  return `${d.getDate()}. ${d.getMonth() + 1}.`;
+}
+function formatDateDMY(d, fmt = 'eu') {
+  if (fmt === 'intl') return `${d.getDate()}-${MONTH_ABBR[d.getMonth()]}-${d.getFullYear()}`;
+  return `${d.getDate()}. ${d.getMonth() + 1}. ${d.getFullYear()}`;
+}
 function formatTimeHM(d) { return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
 
 function niceTicks(minV, maxV, tickCount = 6) {
@@ -143,22 +159,22 @@ function estimateBinEnd(points, idx, wsPeriod) {
   return addDays(s, 1);
 }
 
-function formatRangeTitle(start, end, wsPeriod) {
+function formatRangeTitle(start, end, wsPeriod, fmt = 'eu') {
   if (!start) return "";
-  if (!end) return formatDateDMY(start);
+  if (!end) return formatDateDMY(start, fmt);
   if (wsPeriod === "hour") {
     const sameDay = start.toDateString() === end.toDateString();
-    if (sameDay) return `${formatDateDM(start)} ${formatTimeHM(start)}–${formatTimeHM(end)}`;
-    return `${formatDateDMY(start)} ${formatTimeHM(start)} – ${formatDateDMY(end)} ${formatTimeHM(end)}`;
+    if (sameDay) return `${formatDateDM(start, fmt)} ${formatTimeHM(start)}–${formatTimeHM(end)}`;
+    return `${formatDateDMY(start, fmt)} ${formatTimeHM(start)} – ${formatDateDMY(end, fmt)} ${formatTimeHM(end)}`;
   }
   const sameDate = start.toDateString() === end.toDateString();
-  return sameDate ? formatDateDMY(start) : `${formatDateDM(start)}–${formatDateDM(end)}`;
+  return sameDate ? formatDateDMY(start, fmt) : `${formatDateDM(start, fmt)}–${formatDateDM(end, fmt)}`;
 }
 
 // --- X-LABEL FORMATTER (Localized) ---
-function formatXLabel(start, wsPeriod, idx, lang = 'cs') {
+function formatXLabel(start, wsPeriod, idx, lang = 'cs', fmt = 'eu') {
   if (!start) return "";
-  
+
   if (wsPeriod === "month") {
     const isYearStart = idx === 0 || start.getMonth() === 0;
     try {
@@ -173,10 +189,10 @@ function formatXLabel(start, wsPeriod, idx, lang = 'cs') {
   }
 
   if (wsPeriod === "hour") return `${pad2(start.getHours())}:00`;
-  if (wsPeriod === "day") return formatDateDM(start);
-  if (wsPeriod === "week") return formatDateDM(start);
-  
-  return formatDateDM(start);
+  if (wsPeriod === "day") return formatDateDM(start, fmt);
+  if (wsPeriod === "week") return formatDateDM(start, fmt);
+
+  return formatDateDM(start, fmt);
 }
 
 // ------------------ MAIN CARD CLASS ------------------
@@ -570,7 +586,8 @@ class MinMaxAvgBarCard extends LitElement {
 
   render() {
     const cfg = this._config || {};
-    const lang = (cfg.language || "cs").toLowerCase(); 
+    const lang = (cfg.language || "cs").toLowerCase();
+    const dateFmt = (cfg.date_format || "eu").toLowerCase();
     const i18n = STRINGS[lang] || STRINGS.cs;
     if (!cfg.entity) return html`<ha-card><div class="wrap"><div class="err">${i18n.missing}</div></div></ha-card>`;
     const st = this._stateObj(cfg.entity);
@@ -640,7 +657,7 @@ class MinMaxAvgBarCard extends LitElement {
     const hoverPoint = (hover && data[hover.idx]) ? data[hover.idx] : null;
     const isHoverValid = hoverPoint && !hoverPoint.isEmpty;
     const binEnd = isHoverValid ? estimateBinEnd(data, hover.idx, displayPeriod) : null;
-    const ttTitle = isHoverValid ? formatRangeTitle(hoverPoint.start, binEnd, displayPeriod) : "";
+    const ttTitle = isHoverValid ? formatRangeTitle(hoverPoint.start, binEnd, displayPeriod, dateFmt) : "";
     const fmtVal = (v) => (isFinite(v) ? Number(v).toFixed(decimals) : "–");
 
     // Pass explicit thresholds
@@ -718,7 +735,7 @@ class MinMaxAvgBarCard extends LitElement {
               ${wantXLabels ? data.map((p, i) => {
                 if (i % xLabelEvery !== 0) return nothing;
                 const bxCenter = x0 + i * barStep + barStep / 2;
-                return svg`<text class="xText" x="${bxCenter}" y="${y0 + plotH + 16}" text-anchor="middle">${formatXLabel(p.start, displayPeriod, i, lang)}</text>`;
+                return svg`<text class="xText" x="${bxCenter}" y="${y0 + plotH + 16}" text-anchor="middle">${formatXLabel(p.start, displayPeriod, i, lang, dateFmt)}</text>`;
               }) : nothing}
               
               ${hover ? (() => {
@@ -779,9 +796,10 @@ class MinMaxAvgBarCardEditor extends LitElement {
           { name: "name", selector: { text: {} } }, 
           { name: "entity", selector: { entity: { domain: "sensor" } } }, 
           { name: "height", selector: { number: { min: 240, max: 600, step: 10, mode: "box" } } }, 
-          { name: "preset", selector: { select: { mode: "dropdown", options: [{ value: "temperature", label: "Teplota (Temperature)" }, { value: "beaufort", label: "Vítr (Beaufort)" }] } } }, 
+          { name: "preset", selector: { select: { mode: "dropdown", options: [{ value: "temperature", label: "Temperature (C)" }, { value: "temperature_f", label: "Temperature (F)" }, { value: "beaufort", label: "Wind (Beaufort)" }] } } }, 
           { name: "decimals", selector: { number: { min: 0, max: 3, step: 1, mode: "box" } } }, 
-          { name: "y_padding_ratio", selector: { number: { min: 0.00, max: 0.25, step: 0.01, mode: "box" } } }, 
+          { name: "y_padding_ratio", selector: { number: { min: 0.00, max: 0.25, step: 0.01, mode: "box" } } },
+          { name: "date_format", selector: { select: { mode: "dropdown", options: [{ value: "eu", label: "European (26. 1.)" }, { value: "intl", label: "International (26-Jan)" }] } } },
           { name: "show_x_labels", selector: { boolean: {} } }, 
           { name: "show_y_labels", selector: { boolean: {} } }, 
           { name: "show_y_unit", selector: { boolean: {} } }, 
