@@ -163,6 +163,16 @@ debug: false
 *   The entity must have **Long-Term Statistics** available.
 *   Threshold colors are selected by comparing the **max** value to `lt` ranges.
 
+## Changelog
+
+### v1.1.0 ([PR #1](https://github.com/VitisEK/minmax-avg-bar-card/pull/1))
+
+*   Add `color_by` option to control bar coloring method.
+*   Reorder tooltip to show max on top, min on bottom.
+*   Add Fahrenheit temperature preset and international date format.
+
+Thanks to contributor **[@sxdjt](https://github.com/sxdjt)** for these improvements.
+
 ## Support
 
 If you run into issues or have a feature request, please open an issue here:

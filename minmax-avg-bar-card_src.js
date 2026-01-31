@@ -1,14 +1,6 @@
-// /config/www/minmax-avg-bar-card.js
-// Min/Max/Avg Bar Card – Energy-style SVG chart (HA look), CZ/EN
-// v1.0.0 — STABLE RELEASE
-//          - Preset Loader (Temperature/Wind) in Editor.
-//          - Week/Month toggle for long periods.
-//          - DST-safe date logic.
-//          - Localized labels.
-
 /* eslint-disable no-console */
 
-const MMAB_VERSION = "1.0.0";
+const MMAB_VERSION = "1.1.0";
 
 // --- Lit loader ---
 let Lit, __litFromCDN = false;
