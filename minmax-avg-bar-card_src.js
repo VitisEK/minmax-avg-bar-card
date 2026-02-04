@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 
-const MMAB_VERSION = "1.1.0";
+const MMAB_VERSION = "1.2.0";
 
 // --- Lit loader ---
 let Lit, __litFromCDN = false;
@@ -138,6 +138,30 @@ function colorForValue(v, thresholds) {
   return sorted.length ? sorted[sorted.length - 1].color : "var(--primary-color)";
 }
 
+function normalizeIso(v) {
+  if (!v) return "";
+  if (v instanceof Date) return v.toISOString();
+  return String(v);
+}
+
+function normalizeRange(start, end) {
+  const startIso = normalizeIso(start);
+  const endIso = normalizeIso(end);
+  if (!startIso || !endIso) return null;
+  const s = new Date(startIso);
+  const e = new Date(endIso);
+  if (isNaN(s) || isNaN(e)) return null;
+  return { startIso, endIso, start: s, end: e };
+}
+
+function extractCompareRange(data) {
+  const c = data?.compare || data?.compare_range || data?.compareRange || data?.compare_period || data?.comparePeriod;
+  const start = c?.start ?? c?.start_time ?? c?.startTime ?? data?.compare_start ?? data?.compareStart ?? data?.startCompare ?? data?.compare_from ?? data?.compareFrom;
+  const end = c?.end ?? c?.end_time ?? c?.endTime ?? data?.compare_end ?? data?.compareEnd ?? data?.endCompare ?? data?.compare_to ?? data?.compareTo;
+  const norm = normalizeRange(start, end);
+  return norm ? { startIso: norm.startIso, endIso: norm.endIso } : null;
+}
+
 // --- Tooltip bin end calculation ---
 function estimateBinEnd(points, idx, wsPeriod) {
   const p = points[idx];
@@ -161,6 +185,27 @@ function formatRangeTitle(start, end, wsPeriod, fmt = 'eu') {
   }
   const sameDate = start.toDateString() === end.toDateString();
   return sameDate ? formatDateDMY(start, fmt) : `${formatDateDM(start, fmt)}–${formatDateDM(end, fmt)}`;
+}
+
+function isoWeekYear(d) {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+  return { year: date.getUTCFullYear(), week: weekNo };
+}
+
+function formatHoverHeader(start, end, wsPeriod, fmt = "eu") {
+  if (!start) return { top: "", bottom: "" };
+  if (wsPeriod === "week") {
+    const w = isoWeekYear(start);
+    return { top: `${w.year} / W${pad2(w.week)}`, bottom: formatRangeTitle(start, end, wsPeriod, fmt) };
+  }
+  if (wsPeriod === "month") {
+    return { top: String(start.getFullYear()), bottom: formatRangeTitle(start, end, wsPeriod, fmt) };
+  }
+  return { top: formatRangeTitle(start, end, wsPeriod, fmt), bottom: "" };
 }
 
 // --- X-LABEL FORMATTER (Localized) ---
@@ -199,8 +244,11 @@ class MinMaxAvgBarCard extends LitElement {
       _hover: { state: true },
       _size: { state: true },
       _selection: { state: true },
+      _compareSelection: { state: true },
+      _compareData: { state: true },
       _periodMode: { state: true },
       __lastFetchKey: { state: true },
+      __lastCompareFetchKey: { state: true },
     };
   }
 
@@ -208,9 +256,13 @@ class MinMaxAvgBarCard extends LitElement {
     super();
     this._size = { w: 900, h: 320 };
     this._selection = { startIso: "", endIso: "", wsPeriod: "" };
+    this._compareSelection = { startIso: "", endIso: "", wsPeriod: "" };
+    this._compareData = null;
     this._periodMode = "month"; 
     this.__ro = null;
     this._energySubscription = null;
+    this.__lastCompareFetchKey = "";
+    this.__sharedPeriodHandler = null;
   }
 
   static get styles() {
@@ -229,6 +281,12 @@ class MinMaxAvgBarCard extends LitElement {
         --mmab-avg-stroke: #ffffff;
         --mmab-avg-shadow: rgba(0, 0, 0, 0.5);
         --mmab-bar-radius: 4;
+        --mmab-compare-fill: rgba(160, 160, 160, 0.3);
+        --mmab-compare-fill-opacity: 0.18;
+        --mmab-compare-stroke: rgba(200, 200, 200, 0.7);
+        --mmab-compare-stroke-opacity: 0.4;
+        --mmab-compare-stroke-width: 1;
+        --mmab-compare-stroke-dash: 3 3;
         --mmab-font-tick: 11px;
         --mmab-font-x: 11px;
         --mmab-font-unit: 11px;
@@ -282,9 +340,19 @@ class MinMaxAvgBarCard extends LitElement {
       .barFill { fill-opacity: var(--mmab-fill-opacity); transition: fill-opacity 0.2s; }
       .barStroke { stroke-opacity: var(--mmab-stroke-opacity); stroke-width: var(--mmab-stroke-width); }
       .barFill.active { fill-opacity: 0.5; } 
+
+      .compareFill { fill-opacity: var(--mmab-compare-fill-opacity); }
+      .compareStroke { 
+        stroke-opacity: var(--mmab-compare-stroke-opacity);
+        stroke-width: var(--mmab-compare-stroke-width);
+        stroke-dasharray: var(--mmab-compare-stroke-dash);
+        fill: none;
+      }
       
       .avgShadow { stroke: var(--mmab-avg-shadow); stroke-width: 3; opacity: 0.5; }
       .avgLine { stroke: var(--mmab-avg-stroke); stroke-width: 1.5; }
+      .avgShadowCompare { stroke: var(--mmab-avg-shadow); stroke-width: 3; opacity: 0.25; }
+      .avgLineCompare { stroke: var(--mmab-avg-stroke); stroke-width: 1.5; opacity: 0.5; }
       
       .overlay { fill: transparent; cursor: crosshair; } 
       
@@ -304,6 +372,23 @@ class MinMaxAvgBarCard extends LitElement {
         font-size: 12px;
         z-index: 10;
       }
+      .tt-grid {
+        display: grid;
+        grid-template-columns: auto auto auto;
+        column-gap: 12px;
+        row-gap: 4px;
+        align-items: baseline;
+      }
+      .tt-head {
+        font-weight: 600;
+        opacity: 0.95;
+      }
+      .tt-sub {
+        opacity: 0.8;
+        font-size: 11px;
+      }
+      .tt-label { opacity: 0.9; }
+      .tt-val { font-weight: 700; text-align: right; white-space: nowrap; }
       .tt-title { font-weight: 500; margin-bottom: 4px; font-size: 13px; opacity: 0.9; }
       .tt-row { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 2px; }
       .tt-row .v { font-weight: 700; }
@@ -326,6 +411,7 @@ class MinMaxAvgBarCard extends LitElement {
       color_by: "max",
       listen_energy_date_selection: true,
       default_ws_period: "day",
+      shared_period_mode: false,
       debug: false,
     };
   }
@@ -338,10 +424,13 @@ class MinMaxAvgBarCard extends LitElement {
       this._selection = { ...(this._selection || {}), wsPeriod: (["hour","day","week","month"].includes(p) ? p : "day") };
     }
     this._data = null;
+    this._compareData = null;
     this._err = null;
     this._loading = false;
     this.__lastFetchKey = "";
+    this.__lastCompareFetchKey = "";
     if (this.hass) this._subscribeToEnergy(); 
+    this._setupSharedPeriodMode();
     this._fetchStatsIfNeeded();
   }
 
@@ -364,6 +453,7 @@ class MinMaxAvgBarCard extends LitElement {
       this.__ro.observe(el);
     });
     if (this.hass) this._subscribeToEnergy();
+    this._setupSharedPeriodMode();
   }
 
   disconnectedCallback() {
@@ -373,6 +463,7 @@ class MinMaxAvgBarCard extends LitElement {
         this._energySubscription.then((unsub) => { if(typeof unsub === 'function') unsub(); });
         this._energySubscription = null;
     }
+    this._teardownSharedPeriodMode();
     super.disconnectedCallback();
   }
 
@@ -398,27 +489,33 @@ class MinMaxAvgBarCard extends LitElement {
   _handleEnergyChange(data) {
     if (!data) return;
     if (this._config.debug) console.info("[MMAB] Energy Collection changed:", data);
-    let startIso = null;
-    let endIso = null;
-    if (data.start) startIso = data.start instanceof Date ? data.start.toISOString() : String(data.start);
-    if (data.end) endIso = data.end instanceof Date ? data.end.toISOString() : String(data.end);
-    if (!startIso || !endIso) return;
-    
-    const s = new Date(startIso);
-    const e = new Date(endIso);
-    const diffHours = (e - s) / (1000 * 3600);
+    const mainRange = normalizeRange(data.start, data.end);
+    if (!mainRange) return;
+
+    const diffHours = (mainRange.end - mainRange.start) / (1000 * 3600);
     let inferredPeriod = "day";
 
     if (diffHours <= 48) inferredPeriod = "hour";     
     else if (diffHours <= 35 * 24) inferredPeriod = "day"; 
     else inferredPeriod = "month"; 
     
-    const nextSel = { startIso: startIso, endIso: endIso, wsPeriod: inferredPeriod };
+    const nextSel = { startIso: mainRange.startIso, endIso: mainRange.endIso, wsPeriod: inferredPeriod };
     const same = nextSel.startIso === (this._selection?.startIso || "") && nextSel.endIso === (this._selection?.endIso || "") && nextSel.wsPeriod === (this._selection?.wsPeriod || "");
+
+    const compareRange = extractCompareRange(data);
+    const nextCompare = compareRange
+      ? { startIso: compareRange.startIso, endIso: compareRange.endIso, wsPeriod: inferredPeriod }
+      : { startIso: "", endIso: "", wsPeriod: "" };
+    const sameCompare =
+      nextCompare.startIso === (this._compareSelection?.startIso || "") &&
+      nextCompare.endIso === (this._compareSelection?.endIso || "") &&
+      nextCompare.wsPeriod === (this._compareSelection?.wsPeriod || "");
     
-    if (!same) {
+    if (!same || !sameCompare) {
       this._selection = nextSel;
+      this._compareSelection = nextCompare;
       this.__lastFetchKey = "";
+      this.__lastCompareFetchKey = "";
       this._fetchStatsIfNeeded();
       this.requestUpdate();
     }
@@ -427,8 +524,48 @@ class MinMaxAvgBarCard extends LitElement {
   _setPeriodMode(mode) {
       if(this._periodMode === mode) return;
       this._periodMode = mode;
+      this._broadcastSharedPeriodMode(mode);
       this.__lastFetchKey = ""; // Force refetch
       this._fetchStatsIfNeeded();
+  }
+
+  _setupSharedPeriodMode() {
+    if (!this._config?.shared_period_mode) return;
+    if (this.__sharedPeriodHandler) return;
+    const handler = (e) => {
+      const nextMode = e?.detail?.mode;
+      if (nextMode !== "month" && nextMode !== "week") return;
+      if (this._periodMode === nextMode) return;
+      this._periodMode = nextMode;
+      this.__lastFetchKey = "";
+      this._fetchStatsIfNeeded();
+      this.requestUpdate();
+    };
+    this.__sharedPeriodHandler = handler;
+    window.addEventListener("mmab:period-mode", handler);
+    try {
+      const saved = localStorage.getItem("mmab_shared_period_mode");
+      if (saved === "month" || saved === "week") {
+        if (this._periodMode !== saved) {
+          this._periodMode = saved;
+          this.__lastFetchKey = "";
+          this._fetchStatsIfNeeded();
+          this.requestUpdate();
+        }
+      }
+    } catch {}
+  }
+
+  _teardownSharedPeriodMode() {
+    if (!this.__sharedPeriodHandler) return;
+    window.removeEventListener("mmab:period-mode", this.__sharedPeriodHandler);
+    this.__sharedPeriodHandler = null;
+  }
+
+  _broadcastSharedPeriodMode(mode) {
+    if (!this._config?.shared_period_mode) return;
+    try { localStorage.setItem("mmab_shared_period_mode", mode); } catch {}
+    window.dispatchEvent(new CustomEvent("mmab:period-mode", { detail: { mode } }));
   }
 
   _generateTimeline(start, end, period, fetchedData) {
@@ -477,6 +614,31 @@ class MinMaxAvgBarCard extends LitElement {
     return timeline;
   }
 
+  async _fetchStatsForRange(entity, startIso, endIso, period, cfg) {
+    if (cfg?.debug) console.info(`[MMAB] Fetching ${period} for ${startIso} -> ${endIso}`);
+    const resp = await this.hass.callWS({
+      type: "recorder/statistics_during_period",
+      start_time: startIso,
+      end_time: endIso,
+      statistic_ids: [entity],
+      period: period,
+      types: ["mean", "min", "max"],
+    });
+    const series = resp?.[entity] || [];
+    const fetchedPoints = series
+      .map((p) => ({
+        start: new Date(p.start),
+        min: isFinite(p.min) ? Number(p.min) : null,
+        max: isFinite(p.max) ? Number(p.max) : null,
+        mean: isFinite(p.mean) ? Number(p.mean) : null,
+        isEmpty: false
+      }))
+      .filter((p) => p.start instanceof Date && !isNaN(p.start));
+
+    const genStart = new Date(startIso);
+    return this._generateTimeline(genStart, endIso, period, fetchedPoints);
+  }
+
   async _fetchStatsIfNeeded() {
     const cfg = this._config || {};
     const entity = cfg.entity;
@@ -502,37 +664,54 @@ class MinMaxAvgBarCard extends LitElement {
       endIso = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
     }
 
-    const key = `${entity}|${fetchPeriod}|${startIso}|${endIso}`;
-    if (this.__lastFetchKey === key && Array.isArray(this._data) && this._data.length > 0) return;
-    this.__lastFetchKey = key;
+    const mainKey = `${entity}|${fetchPeriod}|${startIso}|${endIso}`;
+    let compareRange =
+      this._compareSelection?.startIso && this._compareSelection?.endIso
+        ? { startIso: this._compareSelection.startIso, endIso: this._compareSelection.endIso }
+        : null;
+    if (compareRange && compareRange.startIso === startIso && compareRange.endIso === endIso) compareRange = null;
+    const compareKey = compareRange ? `${entity}|${fetchPeriod}|${compareRange.startIso}|${compareRange.endIso}` : "";
+    const shouldFetchMain = !(this.__lastFetchKey === mainKey && Array.isArray(this._data) && this._data.length > 0);
+    const shouldFetchCompare = compareRange
+      ? !(this.__lastCompareFetchKey === compareKey && Array.isArray(this._compareData) && this._compareData.length > 0)
+      : false;
+
+    if (!compareRange && (this._compareData || this.__lastCompareFetchKey)) {
+      this._compareData = null;
+      this.__lastCompareFetchKey = "";
+      this.requestUpdate();
+    }
+
+    if (!shouldFetchMain && !shouldFetchCompare) return;
+
     this._loading = true;
     this._err = null;
     
     try {
-      if (cfg.debug) console.info(`[MMAB] Fetching ${fetchPeriod} for ${startIso} -> ${endIso}`);
-      const resp = await this.hass.callWS({
-        type: "recorder/statistics_during_period",
-        start_time: startIso,
-        end_time: endIso,
-        statistic_ids: [entity],
-        period: fetchPeriod,
-        types: ["mean", "min", "max"],
-      });
-      const series = resp?.[entity] || [];
-      const fetchedPoints = series
-        .map((p) => ({
-          start: new Date(p.start),
-          min: isFinite(p.min) ? Number(p.min) : null,
-          max: isFinite(p.max) ? Number(p.max) : null,
-          mean: isFinite(p.mean) ? Number(p.mean) : null,
-          isEmpty: false
-        }))
-        .filter((p) => p.start instanceof Date && !isNaN(p.start));
-      
-      let genStart = new Date(startIso);
-      
-      const fullTimeline = this._generateTimeline(genStart, endIso, fetchPeriod, fetchedPoints);
-      this._data = fullTimeline;
+      if (shouldFetchMain) {
+        const fullTimeline = await this._fetchStatsForRange(entity, startIso, endIso, fetchPeriod, cfg);
+        this._data = fullTimeline;
+        this.__lastFetchKey = mainKey;
+      }
+
+      if (compareRange && compareRange.startIso === startIso && compareRange.endIso === endIso) {
+        this._compareData = null;
+        this.__lastCompareFetchKey = "";
+      } else if (compareRange && shouldFetchCompare) {
+        try {
+          const compareTimeline = await this._fetchStatsForRange(entity, compareRange.startIso, compareRange.endIso, fetchPeriod, cfg);
+          this._compareData = compareTimeline;
+          this.__lastCompareFetchKey = compareKey;
+        } catch (e) {
+          this._compareData = null;
+          this.__lastCompareFetchKey = "";
+          console.warn("[MMAB] compare fetch error", e);
+        }
+      } else if (!compareRange) {
+        this._compareData = null;
+        this.__lastCompareFetchKey = "";
+      }
+
       this._loading = false;
       this.requestUpdate();
     } catch (e) {
@@ -590,6 +769,8 @@ class MinMaxAvgBarCard extends LitElement {
     const decimals = Number.isFinite(Number(cfg.decimals)) ? Number(cfg.decimals) : 1;
     
     const data = Array.isArray(this._data) ? this._data : [];
+    const compareData = Array.isArray(this._compareData) ? this._compareData : [];
+    const hasCompare = compareData.some((p) => !p.isEmpty && isFinite(p.min) && isFinite(p.max));
     
     const basePeriod = String(this._selection?.wsPeriod || cfg.default_ws_period || "day").toLowerCase();
     let displayPeriod = basePeriod;
@@ -601,12 +782,16 @@ class MinMaxAvgBarCard extends LitElement {
 
     let vMin = Infinity, vMax = -Infinity;
     let hasValid = false;
+    const applyRange = (p) => {
+      vMin = Math.min(vMin, p.min);
+      vMax = Math.max(vMax, p.max);
+      hasValid = true;
+    };
     for (const p of data) {
-      if (!p.isEmpty && isFinite(p.min) && isFinite(p.max)) {
-          vMin = Math.min(vMin, p.min);
-          vMax = Math.max(vMax, p.max);
-          hasValid = true;
-      }
+      if (!p.isEmpty && isFinite(p.min) && isFinite(p.max)) applyRange(p);
+    }
+    for (const p of compareData) {
+      if (!p.isEmpty && isFinite(p.min) && isFinite(p.max)) applyRange(p);
     }
     if (!hasValid) { vMin = 0; vMax = 1; }
 
@@ -619,6 +804,10 @@ class MinMaxAvgBarCard extends LitElement {
     const H = Math.max(240, this._size?.h || 320);
     const plot = this._computePlotGeometry(W, H);
     const { x0, y0, plotW, plotH, n, barStep, barW, barXPad } = plot;
+    const slotGap = hasCompare ? Math.max(1, Math.round(barW * 0.08)) : 0;
+    const slotBarW = hasCompare ? Math.max(1, Math.floor((barW - slotGap) / 2)) : barW;
+    const barXMain = (i) => x0 + i * barStep + barXPad + (hasCompare ? slotBarW + slotGap : 0);
+    const barXCompare = (i) => x0 + i * barStep + barXPad;
     
     const tickCount = clamp(Math.round(plotH / 50) + 1, 4, 8);
     const ticksInfo = niceTicks(vMin, vMax, tickCount);
@@ -648,9 +837,13 @@ class MinMaxAvgBarCard extends LitElement {
 
     const hover = this._hover;
     const hoverPoint = (hover && data[hover.idx]) ? data[hover.idx] : null;
+    const comparePoint = (hover && compareData[hover.idx]) ? compareData[hover.idx] : null;
     const isHoverValid = hoverPoint && !hoverPoint.isEmpty;
+    const isCompareValid = comparePoint && !comparePoint.isEmpty;
     const binEnd = isHoverValid ? estimateBinEnd(data, hover.idx, displayPeriod) : null;
-    const ttTitle = isHoverValid ? formatRangeTitle(hoverPoint.start, binEnd, displayPeriod, dateFmt) : "";
+    const compareBinEnd = isCompareValid ? estimateBinEnd(compareData, hover.idx, displayPeriod) : null;
+    const mainHeader = isHoverValid ? formatHoverHeader(hoverPoint.start, binEnd, displayPeriod, dateFmt) : { top: "", bottom: "" };
+    const compareHeader = isCompareValid ? formatHoverHeader(comparePoint.start, compareBinEnd, displayPeriod, dateFmt) : { top: "", bottom: "" };
     const fmtVal = (v) => (isFinite(v) ? Number(v).toFixed(decimals) : "–");
 
     // Pass explicit thresholds and color_by setting
@@ -700,6 +893,33 @@ class MinMaxAvgBarCard extends LitElement {
                 return lines;
               })()}
               
+              ${hasCompare ? data.map((p, i) => {
+                const cp = compareData[i];
+                if (!cp || cp.isEmpty) return nothing;
+                const minV = isFinite(cp.min) ? cp.min : null;
+                const maxV = isFinite(cp.max) ? cp.max : null;
+                const avgV = isFinite(cp.mean) ? cp.mean : null;
+                if (minV == null || maxV == null) return nothing;
+
+                const bx = barXCompare(i);
+                const colorValue = colorBy === "min" ? minV : (colorBy === "average" ? (avgV ?? maxV) : maxV);
+                const color = colorForValue(colorValue, activeThresholds);
+                const yTop = yFor(maxV);
+                const yBot = yFor(minV);
+                const h = Math.max(2, yBot - yTop);
+                const rx = Number(cfg.bar_radius ?? 4);
+                const avgY = (avgV == null) ? null : yFor(avgV);
+
+                return svg`
+                  <rect class="compareFill" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${color}" rx="${rx}" ry="${rx}"></rect>
+                  <rect class="compareStroke" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
+                  ${avgY == null ? nothing : svg`
+                    <line class="avgShadowCompare" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
+                    <line class="avgLineCompare" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
+                  `}
+                `;
+              }) : nothing}
+
               ${data.map((p, i) => {
                 if (p.isEmpty) return nothing;
                 const minV = isFinite(p.min) ? p.min : null;
@@ -707,7 +927,7 @@ class MinMaxAvgBarCard extends LitElement {
                 const avgV = isFinite(p.mean) ? p.mean : null;
                 if (minV == null || maxV == null) return nothing;
 
-                const bx = x0 + i * barStep + barXPad;
+                const bx = barXMain(i);
                 // Determine which value to use for color based on config
                 const colorValue = colorBy === "min" ? minV : (colorBy === "average" ? (avgV ?? maxV) : maxV);
                 const color = colorForValue(colorValue, activeThresholds);
@@ -719,11 +939,11 @@ class MinMaxAvgBarCard extends LitElement {
                 const isActive = hover && hover.idx === i;
                 
                 return svg`
-                  <rect class="barFill ${isActive ? 'active' : ''}" x="${bx}" y="${yTop}" width="${barW}" height="${h}" fill="${color}" rx="${rx}" ry="${rx}"></rect>
-                  <rect class="barStroke" x="${bx}" y="${yTop}" width="${barW}" height="${h}" fill="none" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
+                  <rect class="barFill ${isActive ? 'active' : ''}" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${color}" rx="${rx}" ry="${rx}"></rect>
+                  <rect class="barStroke" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="none" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
                   ${avgY == null ? nothing : svg`
-                    <line class="avgShadow" x1="${bx + 2}" y1="${avgY}" x2="${bx + barW - 2}" y2="${avgY}"></line>
-                    <line class="avgLine" x1="${bx + 2}" y1="${avgY}" x2="${bx + barW - 2}" y2="${avgY}"></line>
+                    <line class="avgShadow" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
+                    <line class="avgLine" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
                   `}
                 `;
               })}
@@ -742,12 +962,35 @@ class MinMaxAvgBarCard extends LitElement {
               <rect class="overlay" x="${x0}" y="${y0}" width="${plotW}" height="${plotH}"></rect>
             </svg>
 
-            ${isHoverValid ? html`
+            ${(isHoverValid || (hasCompare && isCompareValid)) ? html`
               <div class="tooltip" style="left:${hover.px}px; top:${hover.py}px">
-                <div class="tt-title">${ttTitle}</div>
-                <div class="tt-row"><span class="k">${i18n.max}</span><span class="v">${fmtVal(hoverPoint.max)}${unit ? ` ${unit}` : ""}</span></div>
-                <div class="tt-row"><span class="k">${i18n.avg}</span><span class="v">${fmtVal(hoverPoint.mean)}${unit ? ` ${unit}` : ""}</span></div>
-                <div class="tt-row"><span class="k">${i18n.min}</span><span class="v">${fmtVal(hoverPoint.min)}${unit ? ` ${unit}` : ""}</span></div>
+                ${hasCompare && isCompareValid ? html`
+                  <div class="tt-grid">
+                    <div></div>
+                    <div class="tt-head">${mainHeader.top || ""}</div>
+                    <div class="tt-head">${compareHeader.top || ""}</div>
+                    ${mainHeader.bottom || compareHeader.bottom ? html`
+                      <div></div>
+                      <div class="tt-sub">${mainHeader.bottom || ""}</div>
+                      <div class="tt-sub">${compareHeader.bottom || ""}</div>
+                    ` : nothing}
+                    <div class="tt-label">${i18n.max}</div>
+                    <div class="tt-val">${fmtVal(hoverPoint?.max)}${unit ? ` ${unit}` : ""}</div>
+                    <div class="tt-val">${fmtVal(comparePoint?.max)}${unit ? ` ${unit}` : ""}</div>
+                    <div class="tt-label">${i18n.avg}</div>
+                    <div class="tt-val">${fmtVal(hoverPoint?.mean)}${unit ? ` ${unit}` : ""}</div>
+                    <div class="tt-val">${fmtVal(comparePoint?.mean)}${unit ? ` ${unit}` : ""}</div>
+                    <div class="tt-label">${i18n.min}</div>
+                    <div class="tt-val">${fmtVal(hoverPoint?.min)}${unit ? ` ${unit}` : ""}</div>
+                    <div class="tt-val">${fmtVal(comparePoint?.min)}${unit ? ` ${unit}` : ""}</div>
+                  </div>
+                ` : html`
+                  <div class="tt-title">${mainHeader.top || ""}</div>
+                  ${mainHeader.bottom ? html`<div class="tt-row"><span class="k">${mainHeader.bottom}</span></div>` : nothing}
+                  <div class="tt-row"><span class="k">${i18n.max}</span><span class="v">${fmtVal(hoverPoint.max)}${unit ? ` ${unit}` : ""}</span></div>
+                  <div class="tt-row"><span class="k">${i18n.avg}</span><span class="v">${fmtVal(hoverPoint.mean)}${unit ? ` ${unit}` : ""}</span></div>
+                  <div class="tt-row"><span class="k">${i18n.min}</span><span class="v">${fmtVal(hoverPoint.min)}${unit ? ` ${unit}` : ""}</span></div>
+                `}
               </div>
             ` : nothing}
           </div>
@@ -801,6 +1044,7 @@ class MinMaxAvgBarCardEditor extends LitElement {
           { name: "show_y_labels", selector: { boolean: {} } },
           { name: "show_y_unit", selector: { boolean: {} } },
           { name: "listen_energy_date_selection", selector: { boolean: {} } },
+          { name: "shared_period_mode", selector: { boolean: {} } },
           { name: "default_ws_period", selector: { select: { mode: "dropdown", options: [{ value: "hour", label: "hourly bins" }, { value: "day", label: "daily bins" }, { value: "week", label: "weekly bins" }, { value: "month", label: "monthly bins" }] } } },
           { name: "debug", selector: { boolean: {} } }
       ];
