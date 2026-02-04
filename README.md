@@ -33,6 +33,8 @@ It uses **Long-Term Statistics** (Recorder) to show hourly, daily, weekly, or mo
 *   **Threshold Colors**: Color ranges based on the **max** value (custom or preset).
 *   **Preset Color Scales**: Temperature and Wind (Beaufort) templates, plus custom thresholds.
 *   **Energy Date Sync**: Optionally follows Energy dashboard date selection.
+*   **Energy Compare Overlay**: When Energy dashboard compare is enabled, overlays the comparison period bars.
+*   **Shared Month/Week Toggle**: Optional shared toggle across cards.
 *   **Visual Editor**: Configurable via the Lovelace UI editor.
 
 ## Installation
@@ -154,6 +156,7 @@ show_y_unit: true
 bar_radius: 4
 default_ws_period: day # hour | day | week | month
 listen_energy_date_selection: true
+shared_period_mode: false
 language: cs # cs | en
 debug: false
 ```
@@ -164,6 +167,14 @@ debug: false
 *   Threshold colors are selected by comparing the **max** value to `lt` ranges.
 
 ## Changelog
+
+### v1.2.0
+
+*   Add Energy **compare** support (uses Energy datepicker compare range).
+*   Render compare bars **side-by-side** with main bars, using the same color scale.
+*   Show **average line** inside compare bars (reduced opacity).
+*   Tooltip shows **current vs compare** values side-by-side with period headers.
+*   Optional shared Month/Week toggle across cards (`shared_period_mode`).
 
 ### v1.1.0 ([PR #1](https://github.com/VitisEK/minmax-avg-bar-card/pull/1))
 
