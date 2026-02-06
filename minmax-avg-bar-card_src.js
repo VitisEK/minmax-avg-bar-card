@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 
-const MMAB_VERSION = "1.2.0";
+const MMAB_VERSION = "1.3.0";
 
 // --- Lit loader ---
 let Lit, __litFromCDN = false;

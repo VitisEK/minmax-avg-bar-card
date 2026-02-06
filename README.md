@@ -114,6 +114,21 @@ show_y_labels: true
 show_y_unit: true
 ```
 
+### Trailing (rolling) history
+
+```yaml
+type: custom:minmax-avg-bar-card
+name: Rolling Temperature
+entity: sensor.temperature
+default_ws_period: day
+use_trailing: true
+trailing_periods:
+  hour: 24
+  day: 7
+  week: 4
+  month: 12
+```
+
 ### Follow Energy Dashboard date selection
 
 ```yaml
@@ -155,6 +170,12 @@ show_y_labels: true
 show_y_unit: true
 bar_radius: 4
 default_ws_period: day # hour | day | week | month
+use_trailing: false
+trailing_periods:
+  hour: 24
+  day: 7
+  week: 4
+  month: 12
 listen_energy_date_selection: true
 shared_period_mode: false
 language: cs # cs | en
@@ -165,8 +186,19 @@ debug: false
 
 *   The entity must have **Long-Term Statistics** available.
 *   Threshold colors are selected by comparing the **max** value to `lt` ranges.
+*   Trailing history (`use_trailing`) shows rolling periods instead of calendar bins (e.g., last 7 days).
+*   `trailing_periods` controls how many bins are shown per period.
 
 ## Changelog
+
+### v1.3.0 ([PR #3](https://github.com/VitisEK/minmax-avg-bar-card/pull/3))
+
+*   Add `use_trailing` option to show rolling history instead of calendar periods.
+*   Add `trailing_periods` option to customize the number of periods shown.
+*   Set default trailing periods: hour=24, day=7, week=4, month=12.
+*   Fix tooltip to show single date for daily bins instead of confusing ranges.
+*   Fix tooltip to show month name for monthly bins.
+*   Fix editor crash when `_config` is undefined.
 
 ### v1.2.0
 
