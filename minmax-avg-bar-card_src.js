@@ -30,8 +30,8 @@ const getEnergyDataCollection = (hass) => {
 };
 
 const STRINGS = {
-  cs: { missing: "Chybí konfigurace – zadej entitu.", min: "Min", max: "Max", avg: "Průměr", thresholds: "Barevné rozsahy", thresholds_by: "podle", add: "Přidat", remove: "Odebrat", lt: "méně než", color: "barva", months: "Měsíce", weeks: "Týdny", preset: "Přednastavený styl", color_by: "Barva podle", color_by_max: "Maximum", color_by_average: "Průměr", color_by_min: "Minimum" },
-  en: { missing: "Missing config – provide an entity.", min: "Min", max: "Max", avg: "Avg", thresholds: "Color ranges", thresholds_by: "by", add: "Add", remove: "Remove", lt: "less than", color: "color", months: "Months", weeks: "Weeks", preset: "Style Preset", color_by: "Color by", color_by_max: "Maximum", color_by_average: "Average", color_by_min: "Minimum" },
+  cs: { missing: "Chybí konfigurace – zadej entitu.", min: "Min", max: "Max", avg: "Průměr", thresholds: "Barevné rozsahy", thresholds_by: "podle", add: "Přidat", remove: "Odebrat", lt: "méně než", color: "barva", months: "Měsíce", weeks: "Týdny", preset: "Přednastavený styl", color_by: "Barva podle", color_by_max: "Maximum", color_by_average: "Průměr", color_by_min: "Minimum", use_trailing: "Posuvné období", trailing_periods: "Počet období" },
+  en: { missing: "Missing config – provide an entity.", min: "Min", max: "Max", avg: "Avg", thresholds: "Color ranges", thresholds_by: "by", add: "Add", remove: "Remove", lt: "less than", color: "color", months: "Months", weeks: "Weeks", preset: "Style Preset", color_by: "Color by", color_by_max: "Maximum", color_by_average: "Average", color_by_min: "Minimum", use_trailing: "Trailing period", trailing_periods: "Number of periods" },
 };
 
 // -------------------- PRESETS DEFINITION --------------------
@@ -175,7 +175,7 @@ function estimateBinEnd(points, idx, wsPeriod) {
   return addDays(s, 1);
 }
 
-function formatRangeTitle(start, end, wsPeriod, fmt = 'eu') {
+function formatRangeTitle(start, end, wsPeriod, fmt = 'eu', lang = 'en') {
   if (!start) return "";
   if (!end) return formatDateDMY(start, fmt);
   if (wsPeriod === "hour") {
@@ -183,6 +183,15 @@ function formatRangeTitle(start, end, wsPeriod, fmt = 'eu') {
     if (sameDay) return `${formatDateDM(start, fmt)} ${formatTimeHM(start)}–${formatTimeHM(end)}`;
     return `${formatDateDMY(start, fmt)} ${formatTimeHM(start)} – ${formatDateDMY(end, fmt)} ${formatTimeHM(end)}`;
   }
+  // For day period, show just the single date (the bin end is next day's midnight, not a range)
+  if (wsPeriod === "day") return formatDateDMY(start, fmt);
+  // For month period, show just the month
+  if (wsPeriod === "month") {
+    try {
+      return new Intl.DateTimeFormat(lang, { month: 'long', year: 'numeric' }).format(start);
+    } catch { return formatDateDMY(start, fmt); }
+  }
+  // For week period, show the date range
   const sameDate = start.toDateString() === end.toDateString();
   return sameDate ? formatDateDMY(start, fmt) : `${formatDateDM(start, fmt)}–${formatDateDM(end, fmt)}`;
 }
@@ -656,12 +665,50 @@ class MinMaxAvgBarCard extends LitElement {
 
     let startIso = String(this._selection?.startIso || "");
     let endIso = String(this._selection?.endIso || "");
-    
-    if (!startIso || !endIso) {
+
+    // Trailing mode: show last N periods ending at now
+    const useTrailing = cfg.use_trailing === true;
+
+    if (useTrailing || !startIso || !endIso) {
       const now = new Date();
-      let startDt = new Date(now.getFullYear(), now.getMonth(), 1);
-      startIso = startDt.toISOString();
-      endIso = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+      let startDt;
+      let endDt;
+
+      if (useTrailing) {
+        // Default trailing periods based on period type
+        const defaultTrailing = { hour: 24, day: 7, week: 4, month: 12 };
+        const trailingCount = Number(cfg.trailing_periods) || defaultTrailing[fetchPeriod] || 7;
+
+        // End at start of current period (to get complete periods only)
+        if (fetchPeriod === "hour") {
+          endDt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 0, 0, 0);
+          startDt = addHours(endDt, -trailingCount);
+        } else if (fetchPeriod === "month") {
+          endDt = new Date(now.getFullYear(), now.getMonth(), 1);
+          startDt = addMonths(endDt, -trailingCount);
+        } else if (fetchPeriod === "week") {
+          // Start of current week (Monday)
+          const dayOfWeek = now.getDay();
+          const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+          endDt = startOfDay(addDays(now, -daysToMonday));
+          startDt = addDays(endDt, -trailingCount * 7);
+        } else {
+          // day
+          endDt = startOfDay(now);
+          startDt = addDays(endDt, -trailingCount);
+        }
+
+        // Include current (incomplete) period by extending end to now
+        endDt = now;
+
+        startIso = startDt.toISOString();
+        endIso = endDt.toISOString();
+      } else {
+        // Original calendar-based behavior
+        startDt = new Date(now.getFullYear(), now.getMonth(), 1);
+        startIso = startDt.toISOString();
+        endIso = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+      }
     }
 
     const mainKey = `${entity}|${fetchPeriod}|${startIso}|${endIso}`;
@@ -1046,13 +1093,15 @@ class MinMaxAvgBarCardEditor extends LitElement {
           { name: "listen_energy_date_selection", selector: { boolean: {} } },
           { name: "shared_period_mode", selector: { boolean: {} } },
           { name: "default_ws_period", selector: { select: { mode: "dropdown", options: [{ value: "hour", label: "hourly bins" }, { value: "day", label: "daily bins" }, { value: "week", label: "weekly bins" }, { value: "month", label: "monthly bins" }] } } },
+          { name: "use_trailing", selector: { boolean: {} } },
+          { name: "trailing_periods", selector: { number: { min: 1, max: 365, step: 1, mode: "box" } } },
           { name: "debug", selector: { boolean: {} } }
       ];
   }
   
   render() {
-      if (!this.hass) return nothing;
-      const i18n = STRINGS[this._config?.language || "cs"] || STRINGS.cs;
+      if (!this.hass || !this._config) return nothing;
+      const i18n = STRINGS[this._config.language || "cs"] || STRINGS.cs;
       const thresholds = this._config.thresholds || PRESETS.temperature;
       const hasHaColorPicker = !!customElements.get("ha-color-picker");
       const colorBy = this._config.color_by || "max";
