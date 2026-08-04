@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 
-const MMAB_VERSION = "1.3.0";
+const MMAB_VERSION = "1.3.5";
 
 // --- Lit loader ---
 let Lit, __litFromCDN = false;
@@ -13,25 +13,31 @@ const { LitElement, html, css, svg, nothing } = Lit;
 
 console.info(`[MMAB] v${MMAB_VERSION} loaded (Lit: ${__litFromCDN ? "CDN" : "local"})`);
 
-// ---- Helper: Get Energy Data Collection ----
-const getEnergyDataCollection = (hass) => {
-  if (!hass.connection) return null;
-  if (hass.connection["_energy"]) return hass.connection["_energy"];
-  const myKey = "_energy_minmax_subscription";
-  if (!hass.connection[myKey]) {
-    hass.connection[myKey] = hass.connection.createCollection({
-      key: "energy",
-      fetch: (conn) => conn.sendMessagePromise({ type: "energy/get_prefs" }).catch(() => null),
-      subscribe: (conn, onChange) =>
-        conn.subscribeMessage(onChange, { type: "energy/subscribe" }).catch(() => null),
-    });
+// ---- Helper: Find HA's built-in Energy Data Collection ----
+const ENERGY_COLLECTION_KEY_PREFIX = "energy_";
+const energyConnectionKeys = (hass, collectionKey) => {
+  const keys = [];
+  if (collectionKey) keys.push(`_${collectionKey}`);
+  if (hass?.panelUrl) keys.push(`_${ENERGY_COLLECTION_KEY_PREFIX}${hass.panelUrl}`);
+  keys.push("_energy");
+  for (const key of Object.keys(hass?.connection || {})) {
+    if (key.startsWith("_energy") && !keys.includes(key)) keys.push(key);
   }
-  return hass.connection[myKey];
+  return keys;
+};
+const getEnergyDataCollection = (hass, collectionKey) => {
+  if (!hass?.connection) return null;
+  for (const key of energyConnectionKeys(hass, collectionKey)) {
+    const collection = hass.connection[key];
+    if (collection?.start && collection?.end) return collection;
+    if (collection && typeof collection.subscribe === "function") return collection;
+  }
+  return null;
 };
 
 const STRINGS = {
-  cs: { missing: "Chybí konfigurace – zadej entitu.", min: "Min", max: "Max", avg: "Průměr", thresholds: "Barevné rozsahy", thresholds_by: "podle", add: "Přidat", remove: "Odebrat", lt: "méně než", color: "barva", months: "Měsíce", weeks: "Týdny", preset: "Přednastavený styl", color_by: "Barva podle", color_by_max: "Maximum", color_by_average: "Průměr", color_by_min: "Minimum", use_trailing: "Posuvné období", trailing_periods: "Počet období" },
-  en: { missing: "Missing config – provide an entity.", min: "Min", max: "Max", avg: "Avg", thresholds: "Color ranges", thresholds_by: "by", add: "Add", remove: "Remove", lt: "less than", color: "color", months: "Months", weeks: "Weeks", preset: "Style Preset", color_by: "Color by", color_by_max: "Maximum", color_by_average: "Average", color_by_min: "Minimum", use_trailing: "Trailing period", trailing_periods: "Number of periods" },
+  cs: { missing: "Chybí konfigurace – zadej entitu.", min: "Min", max: "Max", avg: "Průměr", thresholds: "Barevné rozsahy", thresholds_by: "podle", add: "Přidat", remove: "Odebrat", lt: "méně než", color: "barva", days: "Dny", months: "Měsíce", weeks: "Týdny", preset: "Přednastavený styl", color_by: "Barva podle", color_by_max: "Maximum", color_by_average: "Průměr", color_by_min: "Minimum", color_mode: "Výplň baru", color_mode_solid: "Jedna barva", color_mode_gradient: "Plynulý přechod", use_trailing: "Posuvné období", trailing_periods: "Počet období" },
+  en: { missing: "Missing config – provide an entity.", min: "Min", max: "Max", avg: "Avg", thresholds: "Color ranges", thresholds_by: "by", add: "Add", remove: "Remove", lt: "less than", color: "color", days: "Days", months: "Months", weeks: "Weeks", preset: "Style Preset", color_by: "Color by", color_by_max: "Maximum", color_by_average: "Average", color_by_min: "Minimum", color_mode: "Bar fill", color_mode_solid: "Single color", color_mode_gradient: "Smooth gradient", use_trailing: "Trailing period", trailing_periods: "Number of periods" },
 };
 
 // -------------------- PRESETS DEFINITION --------------------
@@ -138,9 +144,51 @@ function colorForValue(v, thresholds) {
   return sorted.length ? sorted[sorted.length - 1].color : "var(--primary-color)";
 }
 
+function gradientStopsForRange(minV, maxV, thresholds) {
+  if (!isFinite(minV) || !isFinite(maxV)) return [];
+  const lo = Math.min(minV, maxV);
+  const hi = Math.max(minV, maxV);
+  const span = hi - lo;
+  if (span <= 0) return [];
+  const th = (Array.isArray(thresholds) && thresholds.length ? thresholds : PRESETS.temperature)
+    .map((t) => ({ lt: Number(t.lt), color: String(t.color ?? "") }))
+    .filter((t) => isFinite(t.lt) && t.color)
+    .sort((a, b) => a.lt - b.lt);
+  const stops = [
+    { offset: 0, color: colorForValue(lo, th) },
+  ];
+  for (const t of th) {
+    if (t.lt > lo && t.lt < hi) {
+      stops.push({ offset: ((t.lt - lo) / span) * 100, color: t.color });
+    }
+  }
+  stops.push({ offset: 100, color: colorForValue(hi, th) });
+  return stops;
+}
+
 function normalizeIso(v) {
-  if (!v) return "";
+  if (v == null || v === "") return "";
   if (v instanceof Date) return v.toISOString();
+  if (typeof v?.toJSDate === "function") {
+    try {
+      const d = v.toJSDate();
+      if (d instanceof Date && !isNaN(d)) return d.toISOString();
+    } catch {}
+  }
+  if (typeof v?.toISOString === "function") {
+    try { return v.toISOString(); } catch {}
+  }
+  if (typeof v === "number") {
+    const d = new Date(v);
+    return isNaN(d) ? "" : d.toISOString();
+  }
+  if (typeof v?.valueOf === "function") {
+    const raw = v.valueOf();
+    if (typeof raw === "number" && isFinite(raw)) {
+      const d = new Date(raw);
+      if (!isNaN(d)) return d.toISOString();
+    }
+  }
   return String(v);
 }
 
@@ -154,12 +202,59 @@ function normalizeRange(start, end) {
   return { startIso, endIso, start: s, end: e };
 }
 
+function extractMainRange(data) {
+  const source =
+    data?.period ??
+    data?.range ??
+    data?.date_selection ??
+    data?.dateSelection ??
+    data?.energy_date_selection ??
+    data?.energyDateSelection ??
+    data;
+  const start =
+    source?.start ??
+    source?.start_time ??
+    source?.startTime ??
+    source?.start_date ??
+    source?.startDate ??
+    source?.from ??
+    data?.start ??
+    data?.start_time ??
+    data?.startTime ??
+    data?.start_date ??
+    data?.startDate ??
+    data?.from;
+  const end =
+    source?.end ??
+    source?.end_time ??
+    source?.endTime ??
+    source?.end_date ??
+    source?.endDate ??
+    source?.to ??
+    data?.end ??
+    data?.end_time ??
+    data?.endTime ??
+    data?.end_date ??
+    data?.endDate ??
+    data?.to;
+  const norm = normalizeRange(start, end);
+  return norm ? { startIso: norm.startIso, endIso: norm.endIso, start: norm.start, end: norm.end } : null;
+}
+
 function extractCompareRange(data) {
   const c = data?.compare || data?.compare_range || data?.compareRange || data?.compare_period || data?.comparePeriod;
   const start = c?.start ?? c?.start_time ?? c?.startTime ?? data?.compare_start ?? data?.compareStart ?? data?.startCompare ?? data?.compare_from ?? data?.compareFrom;
   const end = c?.end ?? c?.end_time ?? c?.endTime ?? data?.compare_end ?? data?.compareEnd ?? data?.endCompare ?? data?.compare_to ?? data?.compareTo;
   const norm = normalizeRange(start, end);
   return norm ? { startIso: norm.startIso, endIso: norm.endIso } : null;
+}
+
+function inferWsPeriodFromRange(range) {
+  if (!range?.start || !range?.end) return "day";
+  const diffHours = (range.end - range.start) / (1000 * 3600);
+  if (diffHours <= 48) return "hour";
+  if (diffHours <= 35 * 24) return "day";
+  return "month";
 }
 
 // --- Tooltip bin end calculation ---
@@ -267,9 +362,12 @@ class MinMaxAvgBarCard extends LitElement {
     this._selection = { startIso: "", endIso: "", wsPeriod: "" };
     this._compareSelection = { startIso: "", endIso: "", wsPeriod: "" };
     this._compareData = null;
-    this._periodMode = "month"; 
+    this._periodMode = "month";
     this.__ro = null;
     this._energySubscription = null;
+    this._energyDirectSubscription = null;
+    this._energyPrefsLoaded = false;
+    this._energyLookupTimer = null;
     this.__lastCompareFetchKey = "";
     this.__sharedPeriodHandler = null;
   }
@@ -301,22 +399,23 @@ class MinMaxAvgBarCard extends LitElement {
         --mmab-font-unit: 11px;
         --mmab-tooltip-bg: var(--card-background-color);
         --mmab-tooltip-border: var(--divider-color);
-        --mmab-hover-line: var(--primary-color, #039be5); 
+        --mmab-hover-line: var(--primary-color, #039be5);
         --mdc-typography-font-family: var(--font-family, Roboto, sans-serif);
       }
       ha-card { height: 100%; display: flex; flex-direction: column; }
       .wrap { padding: var(--mmab-padding); flex: 1; box-sizing: border-box; }
-      
+
       .head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 20px; }
       .title { font-weight: 500; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      
+      .head-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+
       .toggles { display: flex; background: rgba(120,120,120,0.2); border-radius: 16px; padding: 2px; }
-      .toggle-btn { 
-        padding: 4px 12px; 
-        font-size: 12px; 
-        font-weight: 500; 
-        cursor: pointer; 
-        border-radius: 14px; 
+      .toggle-btn {
+        padding: 4px 12px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        border-radius: 14px;
         color: var(--secondary-text-color);
         transition: all 0.2s ease;
       }
@@ -325,19 +424,24 @@ class MinMaxAvgBarCard extends LitElement {
         color: var(--text-primary-color, #fff);
         box-shadow: 0 1px 3px rgba(0,0,0,0.2);
       }
+      @media (max-width: 520px) {
+        .head { align-items: flex-start; }
+        .head-actions { max-width: 100%; }
+        .toggle-btn { padding: 4px 9px; }
+      }
 
       .chart { position: relative; height: var(--mmab-height); width: 100%; }
-      
+
       svg { width: 100%; height: 100%; display: block; overflow: visible; }
       svg text, svg line, svg rect.barFill, svg rect.barStroke { pointer-events: none; }
-      
+
       .tickText { fill: var(--mmab-axis); font-size: var(--mmab-font-tick); font-family: var(--mdc-typography-font-family); }
       .xText { fill: var(--mmab-axis); font-size: var(--mmab-font-x); font-family: var(--mdc-typography-font-family); }
-      
+
       .gridH { stroke: var(--mmab-grid); stroke-width: 1px; shape-rendering: crispEdges; }
       .gridHStrong { stroke: var(--mmab-grid-strong); stroke-width: 1px; shape-rendering: crispEdges; }
       .gridV { stroke: var(--mmab-grid); stroke-width: 1px; shape-rendering: crispEdges; stroke-dasharray: 2 2; }
-      
+
       .hoverLine {
         stroke: var(--mmab-hover-line);
         stroke-width: 1px;
@@ -348,25 +452,25 @@ class MinMaxAvgBarCard extends LitElement {
 
       .barFill { fill-opacity: var(--mmab-fill-opacity); transition: fill-opacity 0.2s; }
       .barStroke { stroke-opacity: var(--mmab-stroke-opacity); stroke-width: var(--mmab-stroke-width); }
-      .barFill.active { fill-opacity: 0.5; } 
+      .barFill.active { fill-opacity: 0.5; }
 
       .compareFill { fill-opacity: var(--mmab-compare-fill-opacity); }
-      .compareStroke { 
+      .compareStroke {
         stroke-opacity: var(--mmab-compare-stroke-opacity);
         stroke-width: var(--mmab-compare-stroke-width);
         stroke-dasharray: var(--mmab-compare-stroke-dash);
         fill: none;
       }
-      
+
       .avgShadow { stroke: var(--mmab-avg-shadow); stroke-width: 3; opacity: 0.5; }
       .avgLine { stroke: var(--mmab-avg-stroke); stroke-width: 1.5; }
       .avgShadowCompare { stroke: var(--mmab-avg-shadow); stroke-width: 3; opacity: 0.25; }
       .avgLineCompare { stroke: var(--mmab-avg-stroke); stroke-width: 1.5; opacity: 0.5; }
-      
-      .overlay { fill: transparent; cursor: crosshair; } 
-      
+
+      .overlay { fill: transparent; cursor: crosshair; }
+
       .yUnit { fill: var(--mmab-axis); font-size: var(--mmab-font-unit); font-weight: 500; }
-      
+
       .tooltip {
         position: absolute;
         pointer-events: none;
@@ -418,7 +522,9 @@ class MinMaxAvgBarCard extends LitElement {
       thresholds: PRESETS.temperature,
       preset: "temperature",
       color_by: "max",
+      bar_color_mode: "solid",
       listen_energy_date_selection: true,
+      collection_key: undefined,
       default_ws_period: "day",
       shared_period_mode: false,
       debug: false,
@@ -438,7 +544,7 @@ class MinMaxAvgBarCard extends LitElement {
     this._loading = false;
     this.__lastFetchKey = "";
     this.__lastCompareFetchKey = "";
-    if (this.hass) this._subscribeToEnergy(); 
+    if (this.hass) this._subscribeToEnergy();
     this._setupSharedPeriodMode();
     this._fetchStatsIfNeeded();
   }
@@ -468,10 +574,27 @@ class MinMaxAvgBarCard extends LitElement {
   disconnectedCallback() {
     try { this.__ro?.disconnect(); } catch {}
     this.__ro = null;
-    if (this._energySubscription) {
-        this._energySubscription.then((unsub) => { if(typeof unsub === 'function') unsub(); });
-        this._energySubscription = null;
+    const collectionUnsub = this._energySubscription;
+    const directUnsub = this._energyDirectSubscription;
+    this._energySubscription = null;
+    this._energyDirectSubscription = null;
+    this._energyPrefsLoaded = false;
+    if (this._energyLookupTimer) {
+      clearInterval(this._energyLookupTimer);
+      this._energyLookupTimer = null;
     }
+    try {
+      if (typeof collectionUnsub === "function") collectionUnsub();
+      else if (collectionUnsub && typeof collectionUnsub.then === "function") {
+        collectionUnsub.then((unsub) => { if (typeof unsub === "function") unsub(); });
+      }
+    } catch (e) { console.warn("[MMAB] Failed to unsubscribe Energy collection:", e); }
+    try {
+      if (typeof directUnsub === "function") directUnsub();
+      else if (directUnsub && typeof directUnsub.then === "function") {
+        directUnsub.then((unsub) => { if (typeof unsub === "function") unsub(); });
+      }
+    } catch (e) { console.warn("[MMAB] Failed to unsubscribe Energy websocket:", e); }
     this._teardownSharedPeriodMode();
     super.disconnectedCallback();
   }
@@ -486,28 +609,48 @@ class MinMaxAvgBarCard extends LitElement {
 
   async _subscribeToEnergy() {
     if (!this.hass || !this._config?.listen_energy_date_selection) return;
-    if (this._energySubscription) return;
     try {
-        const collection = getEnergyDataCollection(this.hass);
-        if (!collection) return;
-        if (this._config.debug) console.info("[MMAB] Subscribing to Energy Collection...");
-        this._energySubscription = collection.subscribe((data) => this._handleEnergyChange(data));
+      if (!this._energySubscription) {
+        const collection = getEnergyDataCollection(this.hass, this._config.collection_key);
+        if (collection) {
+          if (this._config.debug) console.info("[MMAB] Subscribing to Energy Collection...");
+          this._energySubscription = collection.subscribe((data) => this._handleEnergyChange(data));
+          this._handleEnergyChange(collection);
+          if (this._energyLookupTimer) {
+            clearInterval(this._energyLookupTimer);
+            this._energyLookupTimer = null;
+          }
+        } else if (!this._energyLookupTimer) {
+          let tries = 0;
+          this._energyLookupTimer = setInterval(() => {
+            tries += 1;
+            const laterCollection = getEnergyDataCollection(this.hass, this._config?.collection_key);
+            if (laterCollection) {
+              clearInterval(this._energyLookupTimer);
+              this._energyLookupTimer = null;
+              if (!this._energySubscription) {
+                if (this._config?.debug) console.info("[MMAB] Energy Collection found after wait.");
+                this._energySubscription = laterCollection.subscribe((data) => this._handleEnergyChange(data));
+                this._handleEnergyChange(laterCollection);
+              }
+            } else if (tries >= 30) {
+              clearInterval(this._energyLookupTimer);
+              this._energyLookupTimer = null;
+              if (this._config?.debug) console.info("[MMAB] Energy Collection not found.", energyConnectionKeys(this.hass, this._config?.collection_key));
+            }
+          }, 1000);
+        }
+      }
     } catch (e) { console.warn("[MMAB] Failed to subscribe:", e); }
   }
 
   _handleEnergyChange(data) {
     if (!data) return;
     if (this._config.debug) console.info("[MMAB] Energy Collection changed:", data);
-    const mainRange = normalizeRange(data.start, data.end);
+    const mainRange = extractMainRange(data);
     if (!mainRange) return;
+    const inferredPeriod = inferWsPeriodFromRange(mainRange);
 
-    const diffHours = (mainRange.end - mainRange.start) / (1000 * 3600);
-    let inferredPeriod = "day";
-
-    if (diffHours <= 48) inferredPeriod = "hour";     
-    else if (diffHours <= 35 * 24) inferredPeriod = "day"; 
-    else inferredPeriod = "month"; 
-    
     const nextSel = { startIso: mainRange.startIso, endIso: mainRange.endIso, wsPeriod: inferredPeriod };
     const same = nextSel.startIso === (this._selection?.startIso || "") && nextSel.endIso === (this._selection?.endIso || "") && nextSel.wsPeriod === (this._selection?.wsPeriod || "");
 
@@ -519,7 +662,7 @@ class MinMaxAvgBarCard extends LitElement {
       nextCompare.startIso === (this._compareSelection?.startIso || "") &&
       nextCompare.endIso === (this._compareSelection?.endIso || "") &&
       nextCompare.wsPeriod === (this._compareSelection?.wsPeriod || "");
-    
+
     if (!same || !sameCompare) {
       this._selection = nextSel;
       this._compareSelection = nextCompare;
@@ -535,7 +678,18 @@ class MinMaxAvgBarCard extends LitElement {
       this._periodMode = mode;
       this._broadcastSharedPeriodMode(mode);
       this.__lastFetchKey = ""; // Force refetch
+      this.__lastCompareFetchKey = "";
       this._fetchStatsIfNeeded();
+      this.requestUpdate();
+  }
+
+  _setColorBy(mode) {
+    if (!["min", "average", "max"].includes(mode)) return;
+    if ((this._config?.color_by || "max") === mode) return;
+    const nextConfig = { ...(this._config || {}), color_by: mode };
+    this._config = nextConfig;
+    fireEvent(this, "config-changed", { config: nextConfig });
+    this.requestUpdate();
   }
 
   _setupSharedPeriodMode() {
@@ -543,10 +697,11 @@ class MinMaxAvgBarCard extends LitElement {
     if (this.__sharedPeriodHandler) return;
     const handler = (e) => {
       const nextMode = e?.detail?.mode;
-      if (nextMode !== "month" && nextMode !== "week") return;
+      if (nextMode !== "day" && nextMode !== "month" && nextMode !== "week") return;
       if (this._periodMode === nextMode) return;
       this._periodMode = nextMode;
       this.__lastFetchKey = "";
+      this.__lastCompareFetchKey = "";
       this._fetchStatsIfNeeded();
       this.requestUpdate();
     };
@@ -554,10 +709,11 @@ class MinMaxAvgBarCard extends LitElement {
     window.addEventListener("mmab:period-mode", handler);
     try {
       const saved = localStorage.getItem("mmab_shared_period_mode");
-      if (saved === "month" || saved === "week") {
+      if (saved === "day" || saved === "month" || saved === "week") {
         if (this._periodMode !== saved) {
           this._periodMode = saved;
           this.__lastFetchKey = "";
+          this.__lastCompareFetchKey = "";
           this._fetchStatsIfNeeded();
           this.requestUpdate();
         }
@@ -581,20 +737,20 @@ class MinMaxAvgBarCard extends LitElement {
     const timeline = [];
     let current = new Date(start);
     const endDate = new Date(end);
-    
+
     const points = [...fetchedData].sort((a,b) => a.start - b.start);
     let dataIdx = 0;
 
     let safety = 0;
     while (current < endDate && safety < 1000) {
         safety++;
-        
+
         let nextBinStart;
         if (period === "hour") nextBinStart = addHours(current, 1);
         else if (period === "month") nextBinStart = addMonths(current, 1);
         else if (period === "week") nextBinStart = addDays(current, 7);
         else nextBinStart = addDays(current, 1);
-        
+
         let foundPoint = null;
         while(dataIdx < points.length && points[dataIdx].start < current) {
              dataIdx++;
@@ -604,7 +760,7 @@ class MinMaxAvgBarCard extends LitElement {
             const p = points[dataIdx];
             if (p.start < nextBinStart) {
                 foundPoint = p;
-                dataIdx++; 
+                dataIdx++;
             }
         }
 
@@ -617,7 +773,7 @@ class MinMaxAvgBarCard extends LitElement {
                 isEmpty: true
             });
         }
-        
+
         current = nextBinStart;
     }
     return timeline;
@@ -652,13 +808,16 @@ class MinMaxAvgBarCard extends LitElement {
     const cfg = this._config || {};
     const entity = cfg.entity;
     if (!this.hass || !entity) return;
-    
+
     let basePeriod = String(this._selection?.wsPeriod || cfg.default_ws_period || "day").toLowerCase();
-    
+
     let fetchPeriod = basePeriod;
     if (basePeriod === "month") {
         if (this._periodMode === "week") fetchPeriod = "week";
         else fetchPeriod = "month";
+    } else if (basePeriod === "day") {
+        if (this._periodMode === "week") fetchPeriod = "week";
+        else fetchPeriod = "day";
     }
 
     if (!["hour","day","week","month"].includes(fetchPeriod)) fetchPeriod = "day";
@@ -733,7 +892,7 @@ class MinMaxAvgBarCard extends LitElement {
 
     this._loading = true;
     this._err = null;
-    
+
     try {
       if (shouldFetchMain) {
         const fullTimeline = await this._fetchStatsForRange(entity, startIso, endIso, fetchPeriod, cfg);
@@ -770,20 +929,20 @@ class MinMaxAvgBarCard extends LitElement {
   }
 
   _computePlotGeometry(W, H) {
-    const mL = 40; 
-    const mR = 10; 
+    const mL = 40;
+    const mR = 10;
     const mT = 10;
-    const mB = 30; 
+    const mB = 30;
     const x0 = mL, y0 = mT;
     const plotW = Math.max(10, W - mL - mR);
     const plotH = Math.max(10, H - mT - mB);
     const n = Math.max(1, (this._data || []).length);
     const barStep = plotW / n;
-    
+
     let barRatio = 0.65;
-    if (n > 40) barRatio = 0.8; 
-    
-    const barW = Math.max(1, barStep * barRatio); 
+    if (n > 40) barRatio = 0.8;
+
+    const barW = Math.max(1, barStep * barRatio);
     const barXPad = (barStep - barW) / 2;
     return { x0, y0, plotW, plotH, n, barStep, barW, barXPad };
   }
@@ -814,18 +973,22 @@ class MinMaxAvgBarCard extends LitElement {
     const title = cfg.name || (st?.attributes?.friendly_name ?? cfg.entity);
     const height = Number(cfg.height || 320);
     const decimals = Number.isFinite(Number(cfg.decimals)) ? Number(cfg.decimals) : 1;
-    
+
     const data = Array.isArray(this._data) ? this._data : [];
     const compareData = Array.isArray(this._compareData) ? this._compareData : [];
     const hasCompare = compareData.some((p) => !p.isEmpty && isFinite(p.min) && isFinite(p.max));
-    
+
     const basePeriod = String(this._selection?.wsPeriod || cfg.default_ws_period || "day").toLowerCase();
     let displayPeriod = basePeriod;
     if (basePeriod === "month") {
         displayPeriod = this._periodMode === "week" ? "week" : "month";
+    } else if (basePeriod === "day") {
+        displayPeriod = this._periodMode === "week" ? "week" : "day";
     }
 
-    const showToggle = basePeriod === "month";
+    const showToggle = basePeriod === "day" || basePeriod === "month";
+    const primaryToggleMode = basePeriod === "day" ? "day" : "month";
+    const primaryToggleLabel = basePeriod === "day" ? i18n.days : i18n.months;
 
     let vMin = Infinity, vMax = -Infinity;
     let hasValid = false;
@@ -855,7 +1018,7 @@ class MinMaxAvgBarCard extends LitElement {
     const slotBarW = hasCompare ? Math.max(1, Math.floor((barW - slotGap) / 2)) : barW;
     const barXMain = (i) => x0 + i * barStep + barXPad + (hasCompare ? slotBarW + slotGap : 0);
     const barXCompare = (i) => x0 + i * barStep + barXPad;
-    
+
     const tickCount = clamp(Math.round(plotH / 50) + 1, 4, 8);
     const ticksInfo = niceTicks(vMin, vMax, tickCount);
     const yFor = (v) => y0 + (ticksInfo.max - v) * (plotH / (ticksInfo.max - ticksInfo.min));
@@ -870,14 +1033,14 @@ class MinMaxAvgBarCard extends LitElement {
     const wantXLabels = cfg.show_x_labels !== false;
     const wantYLabels = cfg.show_y_labels !== false;
     const showYUnit = cfg.show_y_unit !== false;
-    
+
     const xLabelEvery = (() => {
       if (displayPeriod === "hour") return 4;
-      if (displayPeriod === "day") return 4; 
-      if (displayPeriod === "month") return 1; 
+      if (displayPeriod === "day") return 4;
+      if (displayPeriod === "month") return 1;
       if (displayPeriod === "week") {
-          if (n > 20) return 4; 
-          return 1; 
+          if (n > 20) return 4;
+          return 1;
       }
       return 4;
     })();
@@ -896,31 +1059,42 @@ class MinMaxAvgBarCard extends LitElement {
     // Pass explicit thresholds and color_by setting
     const activeThresholds = Array.isArray(cfg.thresholds) ? cfg.thresholds : PRESETS.temperature;
     const colorBy = ["max", "average", "min"].includes(cfg.color_by) ? cfg.color_by : "max";
+    const useGradientFill = cfg.bar_color_mode === "gradient";
 
     return html`
       <ha-card>
         <div class="wrap" style="--mmab-height:${height}px;">
           <div class="head">
             <div class="title" title="${title}">${title}</div>
-            
-            ${showToggle ? html`
+
+            <div class="head-actions">
               <div class="toggles">
-                <div class="toggle-btn ${this._periodMode === 'month' ? 'active' : ''}" 
-                     @click=${() => this._setPeriodMode('month')}>${i18n.months}</div>
-                <div class="toggle-btn ${this._periodMode === 'week' ? 'active' : ''}" 
-                     @click=${() => this._setPeriodMode('week')}>${i18n.weeks}</div>
+                <div class="toggle-btn ${colorBy === 'min' ? 'active' : ''}"
+                     @click=${() => this._setColorBy('min')}>${i18n.min}</div>
+                <div class="toggle-btn ${colorBy === 'average' ? 'active' : ''}"
+                     @click=${() => this._setColorBy('average')}>${i18n.avg}</div>
+                <div class="toggle-btn ${colorBy === 'max' ? 'active' : ''}"
+                     @click=${() => this._setColorBy('max')}>${i18n.max}</div>
               </div>
-            ` : html`<div></div>`}
+              ${showToggle ? html`
+                <div class="toggles">
+                  <div class="toggle-btn ${displayPeriod === primaryToggleMode ? 'active' : ''}"
+                       @click=${() => this._setPeriodMode(primaryToggleMode)}>${primaryToggleLabel}</div>
+                  <div class="toggle-btn ${this._periodMode === 'week' ? 'active' : ''}"
+                       @click=${() => this._setPeriodMode('week')}>${i18n.weeks}</div>
+                </div>
+              ` : nothing}
+            </div>
           </div>
-          
+
           ${this._err ? html`<div class="err">${this._err}</div>` : nothing}
-          
+
           <div class="chart"
                @mousemove=${(e) => this._onMove(e, e.currentTarget.getBoundingClientRect())}
                @mouseleave=${() => this._onLeave()}>
             <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Min max avg bar chart">
               ${showYUnit && unit ? svg`<text class="yUnit" x="${x0 - 5}" y="${y0 - 6}" text-anchor="end">${unit}</text>` : nothing}
-              
+
               ${ticksInfo.ticks.map((t, idx) => {
                 const y = yFor(t);
                 const strong = (idx === 0 || idx === ticksInfo.ticks.length - 1);
@@ -933,13 +1107,13 @@ class MinMaxAvgBarCard extends LitElement {
                 const lines = [];
                 for (let i = 0; i <= n; i++) {
                    if (i % xLabelEvery === 0) {
-                     const x = x0 + i * barStep + barStep/2; 
+                     const x = x0 + i * barStep + barStep/2;
                      lines.push(svg`<line class="gridV" x1="${x}" y1="${y0}" x2="${x}" y2="${y0 + plotH}"></line>`);
                    }
                 }
                 return lines;
               })()}
-              
+
               ${hasCompare ? data.map((p, i) => {
                 const cp = compareData[i];
                 if (!cp || cp.isEmpty) return nothing;
@@ -956,9 +1130,19 @@ class MinMaxAvgBarCard extends LitElement {
                 const h = Math.max(2, yBot - yTop);
                 const rx = Number(cfg.bar_radius ?? 4);
                 const avgY = (avgV == null) ? null : yFor(avgV);
+                const gradId = `mmab-compare-grad-${i}`;
+                const fill = useGradientFill ? `url(#${gradId})` : color;
+                const stops = useGradientFill ? gradientStopsForRange(minV, maxV, activeThresholds) : [];
 
                 return svg`
-                  <rect class="compareFill" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${color}" rx="${rx}" ry="${rx}"></rect>
+                  ${useGradientFill && stops.length ? svg`
+                    <defs>
+                      <linearGradient id="${gradId}" gradientUnits="userSpaceOnUse" x1="0" y1="${yBot}" x2="0" y2="${yTop}">
+                        ${stops.map((s) => svg`<stop offset="${s.offset}%" stop-color="${s.color}"></stop>`)}
+                      </linearGradient>
+                    </defs>
+                  ` : nothing}
+                  <rect class="compareFill" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${fill}" rx="${rx}" ry="${rx}"></rect>
                   <rect class="compareStroke" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
                   ${avgY == null ? nothing : svg`
                     <line class="avgShadowCompare" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
@@ -984,9 +1168,19 @@ class MinMaxAvgBarCard extends LitElement {
                 const rx = Number(cfg.bar_radius ?? 4);
                 const avgY = (avgV == null) ? null : yFor(avgV);
                 const isActive = hover && hover.idx === i;
-                
+                const gradId = `mmab-main-grad-${i}`;
+                const fill = useGradientFill ? `url(#${gradId})` : color;
+                const stops = useGradientFill ? gradientStopsForRange(minV, maxV, activeThresholds) : [];
+
                 return svg`
-                  <rect class="barFill ${isActive ? 'active' : ''}" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${color}" rx="${rx}" ry="${rx}"></rect>
+                  ${useGradientFill && stops.length ? svg`
+                    <defs>
+                      <linearGradient id="${gradId}" gradientUnits="userSpaceOnUse" x1="0" y1="${yBot}" x2="0" y2="${yTop}">
+                        ${stops.map((s) => svg`<stop offset="${s.offset}%" stop-color="${s.color}"></stop>`)}
+                      </linearGradient>
+                    </defs>
+                  ` : nothing}
+                  <rect class="barFill ${isActive ? 'active' : ''}" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${fill}" rx="${rx}" ry="${rx}"></rect>
                   <rect class="barStroke" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="none" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
                   ${avgY == null ? nothing : svg`
                     <line class="avgShadow" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
@@ -1000,7 +1194,7 @@ class MinMaxAvgBarCard extends LitElement {
                 const bxCenter = x0 + i * barStep + barStep / 2;
                 return svg`<text class="xText" x="${bxCenter}" y="${y0 + plotH + 16}" text-anchor="middle">${formatXLabel(p.start, displayPeriod, i, lang, dateFmt)}</text>`;
               }) : nothing}
-              
+
               ${hover ? (() => {
                  const hx = x0 + hover.idx * barStep + barStep / 2;
                  return svg`<line class="hoverLine" x1="${hx}" y1="${y0}" x2="${hx}" y2="${y0 + plotH}"></line>`;
@@ -1051,39 +1245,41 @@ function cssColorToHex(colorStr, scopeEl) { try { const probe = document.createE
 class MinMaxAvgBarCardEditor extends LitElement {
   static get properties() { return { hass: {}, _config: {} }; }
   setConfig(config) { this._config = { ...(config || {}) }; if (!Array.isArray(this._config.thresholds)) this._config.thresholds = PRESETS.temperature; if (this._config.listen_energy_date_selection === undefined) this._config.listen_energy_date_selection = true; }
-  
-  _valueChanged(ev) { 
-    ev.stopPropagation(); 
-    let newConfig = ev.detail.value; 
-    
+
+  _valueChanged(ev) {
+    ev.stopPropagation();
+    let newConfig = ev.detail.value;
+
     // --- TEMPLATE LOADER LOGIC ---
     const oldPreset = this._config?.preset;
     const newPreset = newConfig?.preset;
-    
+
     if (newPreset && newPreset !== oldPreset) {
         const template = PRESETS[newPreset] || PRESETS.temperature;
         newConfig = { ...newConfig, thresholds: template.map(t => ({...t})) };
     }
     // -----------------------------
 
-    this._config = newConfig; 
-    fireEvent(this, "config-changed", { config: newConfig }); 
+    this._config = newConfig;
+    fireEvent(this, "config-changed", { config: newConfig });
   }
-  
+
   _setThresholds(arr) { const cleaned = (arr || []).map(t => ({ lt: Number(t.lt), color: String(t.color ?? "") })).filter(t => isFinite(t.lt) && t.color).sort((a, b) => a.lt - b.lt); const cfg = { ...(this._config || {}) }; cfg.thresholds = cleaned.length ? cleaned : PRESETS.temperature; this._config = cfg; fireEvent(this, "config-changed", { config: cfg }); }
   _updateThreshold(idx, patch) { const arr = (this._config.thresholds || []).map(t => ({...t})); arr[idx] = { ...(arr[idx] || {}), ...(patch || {}) }; this._setThresholds(arr); }
   _addThreshold() { const arr = (this._config.thresholds || []).map(t => ({...t})); arr.push({ lt: (Number(arr[arr.length - 1]?.lt) || 0) + 10, color: "#ffffff" }); this._setThresholds(arr); }
   _removeThreshold(idx) { const arr = (this._config.thresholds || []).map(t => ({...t})); arr.splice(idx, 1); this._setThresholds(arr.length ? arr : PRESETS.temperature); }
-  
+
   static get styles() { return css`:host { display:block; padding: 8px 0; } .section { margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 10px; } .th-head { display:flex; align-items:center; justify-content: space-between; margin-bottom: 8px; } .th-title { font-weight: 600; } .rows { display:flex; flex-direction: column; gap: 10px; } .row { display:grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: center; } .colorwrap { display:flex; align-items:center; gap: 10px; } .colorbox { width: 28px; height: 28px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.16); } input[type="color"] { width: 46px; height: 34px; padding: 0; border: none; background: transparent; }`; }
-  
+
   get _schema() {
+      const i18n = STRINGS[this._config?.language || "cs"] || STRINGS.cs;
       return [
           { name: "name", selector: { text: {} } },
           { name: "entity", selector: { entity: { domain: "sensor" } } },
           { name: "height", selector: { number: { min: 240, max: 600, step: 10, mode: "box" } } },
           { name: "preset", selector: { select: { mode: "dropdown", options: [{ value: "temperature", label: "Temperature (C)" }, { value: "temperature_f", label: "Temperature (F)" }, { value: "beaufort", label: "Wind (Beaufort)" }] } } },
           { name: "color_by", selector: { select: { mode: "dropdown", options: [{ value: "max", label: "Maximum" }, { value: "average", label: "Average" }, { value: "min", label: "Minimum" }] } } },
+          { name: "bar_color_mode", selector: { select: { mode: "dropdown", options: [{ value: "solid", label: i18n.color_mode_solid }, { value: "gradient", label: i18n.color_mode_gradient }] } }, label: i18n.color_mode },
           { name: "decimals", selector: { number: { min: 0, max: 3, step: 1, mode: "box" } } },
           { name: "y_padding_ratio", selector: { number: { min: 0.00, max: 0.25, step: 0.01, mode: "box" } } },
           { name: "date_format", selector: { select: { mode: "dropdown", options: [{ value: "eu", label: "European (26. 1.)" }, { value: "intl", label: "International (26-Jan)" }] } } },
@@ -1091,6 +1287,7 @@ class MinMaxAvgBarCardEditor extends LitElement {
           { name: "show_y_labels", selector: { boolean: {} } },
           { name: "show_y_unit", selector: { boolean: {} } },
           { name: "listen_energy_date_selection", selector: { boolean: {} } },
+          { name: "collection_key", selector: { text: {} } },
           { name: "shared_period_mode", selector: { boolean: {} } },
           { name: "default_ws_period", selector: { select: { mode: "dropdown", options: [{ value: "hour", label: "hourly bins" }, { value: "day", label: "daily bins" }, { value: "week", label: "weekly bins" }, { value: "month", label: "monthly bins" }] } } },
           { name: "use_trailing", selector: { boolean: {} } },
@@ -1098,7 +1295,7 @@ class MinMaxAvgBarCardEditor extends LitElement {
           { name: "debug", selector: { boolean: {} } }
       ];
   }
-  
+
   render() {
       if (!this.hass || !this._config) return nothing;
       const i18n = STRINGS[this._config.language || "cs"] || STRINGS.cs;
@@ -1112,24 +1309,24 @@ class MinMaxAvgBarCardEditor extends LitElement {
         <div class="section">
             <div class="th-head"><div class="th-title">${i18n.thresholds} (${i18n.thresholds_by} ${colorByLabel})</div><mwc-button @click=${() => this._addThreshold()}>${i18n.add}</mwc-button></div>
             <div class="rows">
-                ${thresholds.map((t, idx) => { 
-                    const col = t.color || ""; 
-                    const hexLike = cssColorToHex(col, this) || "#3f51b5"; 
+                ${thresholds.map((t, idx) => {
+                    const col = t.color || "";
+                    const hexLike = cssColorToHex(col, this) || "#3f51b5";
                     return html`
                         <div class="row">
                             <ha-textfield label="${i18n.lt}" type="number" .value=${String(t.lt)} @change=${(e) => this._updateThreshold(idx, { lt: Number(e.target.value) })}></ha-textfield>
                             <div class="colorwrap">
                                 <div class="colorbox" style="background:${col};"></div>
-                                ${hasHaColorPicker 
-                                    ? html`<ha-color-picker .value=${hexLike} @value-changed=${(e) => this._updateThreshold(idx, { color: e.detail?.value || hexLike })}></ha-color-picker>` 
+                                ${hasHaColorPicker
+                                    ? html`<ha-color-picker .value=${hexLike} @value-changed=${(e) => this._updateThreshold(idx, { color: e.detail?.value || hexLike })}></ha-color-picker>`
                                     : html`<input type="color" .value=${hexLike} @input=${(e) => this._updateThreshold(idx, { color: e.target.value })} />`}
                                 <ha-textfield label="${i18n.color}" .value=${col} @change=${(e) => this._updateThreshold(idx, { color: e.target.value })}></ha-textfield>
                             </div>
                             <ha-icon-button icon="mdi:delete" @click=${() => this._removeThreshold(idx)}></ha-icon-button>
-                        </div>`; 
+                        </div>`;
                 })}
             </div>
-        </div>`; 
+        </div>`;
   }
 }
 customElements.define("minmax-avg-bar-card-editor", MinMaxAvgBarCardEditor);
