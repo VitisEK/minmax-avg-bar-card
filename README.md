@@ -19,7 +19,7 @@ It uses **Long-Term Statistics** (Recorder) to show hourly, daily, weekly, or mo
 
 *   **One bar per bin**: Each bar represents the **min to max** range for a selected bin (hour/day/week/month).
 *   **Average line**: A thin line inside the bar marks the **average** value for the same bin.
-*   **Color by max**: Bar color is chosen by comparing the **max** value to your threshold ranges.
+*   **Color by min/avg/max**: Bar color is chosen by comparing the selected **min**, **average**, or **max** value to your threshold ranges.
 *   **Gaps for missing stats**: If Recorder has no data for a bin, that bin is left empty.
 *   **Dynamic labels**: X labels adapt to the selected period and locale.
 *   **Energy date sync**: When enabled, the card follows the Energy dashboard time selection.
@@ -30,7 +30,7 @@ It uses **Long-Term Statistics** (Recorder) to show hourly, daily, weekly, or mo
 *   **Min/Max/Avg Bars**: Min/Max as a colored bar, Avg as a line.
 *   **Period Support**: Hour / Day / Week / Month bins (configurable).
 *   **Month Toggle**: When period is long, switch between Month and Week bins.
-*   **Threshold Colors**: Color ranges based on the **max** value (custom or preset).
+*   **Threshold Colors**: Color ranges based on the selected min/average/max value (custom or preset).
 *   **Preset Color Scales**: Temperature and Wind (Beaufort) templates, plus custom thresholds.
 *   **Energy Date Sync**: Optionally follows Energy dashboard date selection.
 *   **Energy Compare Overlay**: When Energy dashboard compare is enabled, overlays the comparison period bars.
@@ -47,7 +47,7 @@ It uses **Long-Term Statistics** (Recorder) to show hourly, daily, weekly, or mo
 4.  Add the URL of this repository: `https://github.com/VitisEK/minmax-avg-bar-card`.
 5.  Select category: **Lovelace**.
 6.  Click **Add** and then install the card.
-7.  Reload resources (or restart HA).
+7.  Reload resources and hard-refresh the browser.
 
 ### Manual Installation
 
@@ -56,6 +56,33 @@ It uses **Long-Term Statistics** (Recorder) to show hourly, daily, weekly, or mo
 3.  Add the resource in **Settings** -> **Dashboards** -> **Three dots** -> **Resources**:
     *   URL: `/local/minmax-avg-bar-card.js`
     *   Type: `JavaScript Module`
+
+## Local HA deploy checklist
+
+When testing from this Home Assistant instance:
+
+1. Copy the built card to the active HA resource path:
+   - `_dev/minmax-avg-bar-card/minmax-avg-bar-card.js`
+   - `/config/www/minmax-avg-bar-card.js` if the top-level local resource is used
+2. Always update the Dashboard resource URL cache version in **Settings → Dashboards → Resources** after copying.
+   - Example: `/local/_dev/minmax-avg-bar-card/minmax-avg-bar-card.js?v=1.3.5`
+3. If the resource is edited through `.storage/lovelace_resources`, create a timestamped backup first.
+4. Hard-refresh the browser or clear the Companion App frontend cache.
+5. Verify the browser console shows the expected `MMAB` version.
+
+Do not restart Home Assistant Core as part of this deploy flow; restart manually only when needed.
+
+For Energy date picker sync, set the same `collection_key` on the picker and this card when using a custom key:
+
+```yaml
+type: energy-date-selection
+collection_key: energy_dashboard_energy
+```
+
+```yaml
+type: custom:minmax-avg-bar-card
+collection_key: energy_dashboard_energy
+```
 
 ## Usage
 
@@ -168,6 +195,8 @@ thresholds:
 show_x_labels: true
 show_y_labels: true
 show_y_unit: true
+color_by: max # min | average | max
+bar_color_mode: solid # solid | gradient
 bar_radius: 4
 default_ws_period: day # hour | day | week | month
 use_trailing: false
@@ -185,7 +214,7 @@ debug: false
 ## Notes
 
 *   The entity must have **Long-Term Statistics** available.
-*   Threshold colors are selected by comparing the **max** value to `lt` ranges.
+*   Threshold colors are selected by comparing the active `color_by` value to `lt` ranges. The active value can be switched from the card header.
 *   Trailing history (`use_trailing`) shows rolling periods instead of calendar bins (e.g., last 7 days).
 *   `trailing_periods` controls how many bins are shown per period.
 
