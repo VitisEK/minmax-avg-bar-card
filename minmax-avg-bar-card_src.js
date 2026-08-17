@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 
-const MMAB_VERSION = "1.3.5";
+const MMAB_VERSION = "1.3.6";
 
 // --- Lit loader ---
 let Lit, __litFromCDN = false;
@@ -133,15 +133,17 @@ function niceTicks(minV, maxV, tickCount = 6) {
   return { min: niceMin, max: niceMax, step, ticks };
 }
 
+function normalizeThresholds(thresholds) {
+  return (Array.isArray(thresholds) && thresholds.length ? thresholds : PRESETS.temperature)
+    .map((t) => ({ lt: Number(t.lt), color: String(t.color ?? "") }))
+    .filter((t) => isFinite(t.lt) && t.color)
+    .sort((a, b) => a.lt - b.lt);
+}
+
 function colorForValue(v, thresholds) {
   if (!isFinite(v)) return "var(--disabled-text-color)";
-  const th = Array.isArray(thresholds) && thresholds.length ? thresholds : PRESETS.temperature;
-  const sorted = th
-    .map(t => ({ lt: Number(t.lt), color: String(t.color ?? "") }))
-    .filter(t => isFinite(t.lt) && t.color)
-    .sort((a, b) => a.lt - b.lt);
-  for (const t of sorted) if (v < t.lt) return t.color;
-  return sorted.length ? sorted[sorted.length - 1].color : "var(--primary-color)";
+  for (const t of thresholds) if (v < t.lt) return t.color;
+  return thresholds.length ? thresholds[thresholds.length - 1].color : "var(--primary-color)";
 }
 
 function gradientStopsForRange(minV, maxV, thresholds) {
@@ -150,19 +152,15 @@ function gradientStopsForRange(minV, maxV, thresholds) {
   const hi = Math.max(minV, maxV);
   const span = hi - lo;
   if (span <= 0) return [];
-  const th = (Array.isArray(thresholds) && thresholds.length ? thresholds : PRESETS.temperature)
-    .map((t) => ({ lt: Number(t.lt), color: String(t.color ?? "") }))
-    .filter((t) => isFinite(t.lt) && t.color)
-    .sort((a, b) => a.lt - b.lt);
   const stops = [
-    { offset: 0, color: colorForValue(lo, th) },
+    { offset: 0, color: colorForValue(lo, thresholds) },
   ];
-  for (const t of th) {
+  for (const t of thresholds) {
     if (t.lt > lo && t.lt < hi) {
       stops.push({ offset: ((t.lt - lo) / span) * 100, color: t.color });
     }
   }
-  stops.push({ offset: 100, color: colorForValue(hi, th) });
+  stops.push({ offset: 100, color: colorForValue(hi, thresholds) });
   return stops;
 }
 
@@ -343,7 +341,6 @@ class MinMaxAvgBarCard extends LitElement {
       hass: {},
       _config: {},
       _data: { state: true },
-      _loading: { state: true },
       _err: { state: true },
       _hover: { state: true },
       _size: { state: true },
@@ -351,8 +348,6 @@ class MinMaxAvgBarCard extends LitElement {
       _compareSelection: { state: true },
       _compareData: { state: true },
       _periodMode: { state: true },
-      __lastFetchKey: { state: true },
-      __lastCompareFetchKey: { state: true },
     };
   }
 
@@ -365,17 +360,25 @@ class MinMaxAvgBarCard extends LitElement {
     this._periodMode = "month";
     this.__ro = null;
     this._energySubscription = null;
-    this._energyDirectSubscription = null;
-    this._energyPrefsLoaded = false;
     this._energyLookupTimer = null;
     this.__lastCompareFetchKey = "";
+    this.__pendingFetchKey = "";
+    this.__fetchRequestId = 0;
     this.__sharedPeriodHandler = null;
+    this.__pointerGeometry = null;
+    this.__tooltipElement = null;
+    this.__activeThresholds = PRESETS.temperature;
+    this.__intersectionObserver = null;
+    this.__isVisible = typeof IntersectionObserver === "undefined";
+    this.__visibilityUpdate = false;
   }
 
   static get styles() {
     return css`
       :host {
         display: block;
+        content-visibility: auto;
+        contain-intrinsic-size: auto 400px;
         color: var(--primary-text-color);
         --mmab-padding: 16px;
         --mmab-height: 320px;
@@ -386,9 +389,7 @@ class MinMaxAvgBarCard extends LitElement {
         --mmab-stroke-opacity: 1;
         --mmab-stroke-width: 2;
         --mmab-avg-stroke: #ffffff;
-        --mmab-avg-shadow: rgba(0, 0, 0, 0.5);
         --mmab-bar-radius: 4;
-        --mmab-compare-fill: rgba(160, 160, 160, 0.3);
         --mmab-compare-fill-opacity: 0.18;
         --mmab-compare-stroke: rgba(200, 200, 200, 0.7);
         --mmab-compare-stroke-opacity: 0.4;
@@ -433,7 +434,7 @@ class MinMaxAvgBarCard extends LitElement {
       .chart { position: relative; height: var(--mmab-height); width: 100%; }
 
       svg { width: 100%; height: 100%; display: block; overflow: visible; }
-      svg text, svg line, svg rect.barFill, svg rect.barStroke { pointer-events: none; }
+      svg text, svg line, svg rect { pointer-events: none; }
 
       .tickText { fill: var(--mmab-axis); font-size: var(--mmab-font-tick); font-family: var(--mdc-typography-font-family); }
       .xText { fill: var(--mmab-axis); font-size: var(--mmab-font-x); font-family: var(--mdc-typography-font-family); }
@@ -450,21 +451,21 @@ class MinMaxAvgBarCard extends LitElement {
         opacity: 0.9;
       }
 
-      .barFill { fill-opacity: var(--mmab-fill-opacity); transition: fill-opacity 0.2s; }
-      .barStroke { stroke-opacity: var(--mmab-stroke-opacity); stroke-width: var(--mmab-stroke-width); }
-      .barFill.active { fill-opacity: 0.5; }
+      .bar {
+        fill-opacity: var(--mmab-fill-opacity);
+        stroke-opacity: var(--mmab-stroke-opacity);
+        stroke-width: var(--mmab-stroke-width);
+      }
+      .bar.active { fill-opacity: 0.5; }
 
-      .compareFill { fill-opacity: var(--mmab-compare-fill-opacity); }
-      .compareStroke {
+      .compareBar {
+        fill-opacity: var(--mmab-compare-fill-opacity);
         stroke-opacity: var(--mmab-compare-stroke-opacity);
         stroke-width: var(--mmab-compare-stroke-width);
         stroke-dasharray: var(--mmab-compare-stroke-dash);
-        fill: none;
       }
 
-      .avgShadow { stroke: var(--mmab-avg-shadow); stroke-width: 3; opacity: 0.5; }
       .avgLine { stroke: var(--mmab-avg-stroke); stroke-width: 1.5; }
-      .avgShadowCompare { stroke: var(--mmab-avg-shadow); stroke-width: 3; opacity: 0.25; }
       .avgLineCompare { stroke: var(--mmab-avg-stroke); stroke-width: 1.5; opacity: 0.5; }
 
       .overlay { fill: transparent; cursor: crosshair; }
@@ -533,7 +534,9 @@ class MinMaxAvgBarCard extends LitElement {
 
   setConfig(config) {
     if (!config || !config.entity) throw new Error("entity is required");
+    const previousConfig = this._config;
     this._config = { ...MinMaxAvgBarCard.getStubConfig(), ...config };
+    this.__activeThresholds = normalizeThresholds(this._config.thresholds);
     if (!this._selection?.wsPeriod) {
       const p = String(this._config.default_ws_period || "day").toLowerCase();
       this._selection = { ...(this._selection || {}), wsPeriod: (["hour","day","week","month"].includes(p) ? p : "day") };
@@ -544,8 +547,15 @@ class MinMaxAvgBarCard extends LitElement {
     this._loading = false;
     this.__lastFetchKey = "";
     this.__lastCompareFetchKey = "";
+    this.__pendingFetchKey = "";
+    this.__fetchRequestId += 1;
+    if (previousConfig && (
+      previousConfig.listen_energy_date_selection !== this._config.listen_energy_date_selection ||
+      previousConfig.collection_key !== this._config.collection_key
+    )) this._clearEnergySubscription();
     if (this.hass) this._subscribeToEnergy();
-    this._setupSharedPeriodMode();
+    if (this._config.shared_period_mode) this._setupSharedPeriodMode();
+    else this._teardownSharedPeriodMode();
     this._fetchStatsIfNeeded();
   }
 
@@ -553,32 +563,96 @@ class MinMaxAvgBarCard extends LitElement {
   _stateObj(entityId) { return entityId ? this.hass?.states?.[entityId] : null; }
   _unit(entityId) { return this._stateObj(entityId)?.attributes?.unit_of_measurement || ""; }
 
-  connectedCallback() {
-    super.connectedCallback();
+  shouldUpdate(changedProps) {
+    if (this.__visibilityUpdate) {
+      this.__visibilityUpdate = false;
+      return true;
+    }
+    if (!this.__isVisible && this.hasUpdated) return false;
+    if (changedProps.size !== 1 || !changedProps.has("hass")) return true;
+    const previousHass = changedProps.get("hass");
+    if (!previousHass) return true;
+    if (!this._data && !this._loading) return true;
+    const entity = this._config?.entity;
+    const previousState = previousHass.states?.[entity];
+    const nextState = this.hass?.states?.[entity];
+    if (!previousState || !nextState) return previousState !== nextState;
+    return (
+      previousState.attributes?.unit_of_measurement !== nextState.attributes?.unit_of_measurement ||
+      previousState.attributes?.friendly_name !== nextState.attributes?.friendly_name
+    );
+  }
+
+  _setupResizeObserver() {
+    if (this.__ro) return;
     this.updateComplete.then(() => {
       const el = this.renderRoot?.querySelector(".chart");
-      if (!el || this.__ro) return;
+      if (!el || this.__ro || !this.isConnected) return;
       this.__ro = new ResizeObserver((entries) => {
         const r = entries?.[0]?.contentRect;
         if (!r) return;
+        this.__pointerGeometry = null;
         const w = Math.max(320, Math.round(r.width));
         const h = Math.max(240, Math.round(r.height));
         if (w !== this._size.w || h !== this._size.h) this._size = { w, h };
       });
       this.__ro.observe(el);
     });
-    if (this.hass) this._subscribeToEnergy();
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    if (typeof IntersectionObserver !== "undefined" && !this.__intersectionObserver) {
+      this.__intersectionObserver = new IntersectionObserver((entries) => {
+        const isVisible = entries.some((entry) => entry.isIntersecting);
+        if (isVisible === this.__isVisible) return;
+        this.__isVisible = isVisible;
+        this.__visibilityUpdate = true;
+        if (isVisible) {
+          this._subscribeToEnergy();
+          this._fetchStatsIfNeeded();
+          this.requestUpdate();
+          this._setupResizeObserver();
+        } else {
+          try { this.__ro?.disconnect(); } catch {}
+          this.__ro = null;
+          this._clearEnergySubscription();
+          this.__fetchRequestId += 1;
+          this.__pendingFetchKey = "";
+          this._loading = false;
+          this._hover = null;
+          this.requestUpdate();
+        }
+      }, { rootMargin: "200px 0px" });
+      this.__intersectionObserver.observe(this);
+    }
+    this._setupResizeObserver();
+    if (this.hass) {
+      this._subscribeToEnergy();
+      if (!this._data && !this._loading) this._fetchStatsIfNeeded();
+    }
     this._setupSharedPeriodMode();
   }
 
   disconnectedCallback() {
     try { this.__ro?.disconnect(); } catch {}
     this.__ro = null;
+    try { this.__intersectionObserver?.disconnect(); } catch {}
+    this.__intersectionObserver = null;
+    if (typeof IntersectionObserver !== "undefined") this.__isVisible = null;
+    this.__pointerGeometry = null;
+    this.__tooltipElement = null;
+    this._clearEnergySubscription();
+    this.__fetchRequestId += 1;
+    this.__pendingFetchKey = "";
+    this._loading = false;
+    this._teardownSharedPeriodMode();
+    super.disconnectedCallback();
+  }
+
+  _clearEnergySubscription() {
     const collectionUnsub = this._energySubscription;
-    const directUnsub = this._energyDirectSubscription;
     this._energySubscription = null;
-    this._energyDirectSubscription = null;
-    this._energyPrefsLoaded = false;
     if (this._energyLookupTimer) {
       clearInterval(this._energyLookupTimer);
       this._energyLookupTimer = null;
@@ -589,14 +663,6 @@ class MinMaxAvgBarCard extends LitElement {
         collectionUnsub.then((unsub) => { if (typeof unsub === "function") unsub(); });
       }
     } catch (e) { console.warn("[MMAB] Failed to unsubscribe Energy collection:", e); }
-    try {
-      if (typeof directUnsub === "function") directUnsub();
-      else if (directUnsub && typeof directUnsub.then === "function") {
-        directUnsub.then((unsub) => { if (typeof unsub === "function") unsub(); });
-      }
-    } catch (e) { console.warn("[MMAB] Failed to unsubscribe Energy websocket:", e); }
-    this._teardownSharedPeriodMode();
-    super.disconnectedCallback();
   }
 
   updated(changedProps) {
@@ -608,7 +674,7 @@ class MinMaxAvgBarCard extends LitElement {
   }
 
   async _subscribeToEnergy() {
-    if (!this.hass || !this._config?.listen_energy_date_selection) return;
+    if (!this.__isVisible || !this.hass || !this._config?.listen_energy_date_selection) return;
     try {
       if (!this._energySubscription) {
         const collection = getEnergyDataCollection(this.hass, this._config.collection_key);
@@ -805,6 +871,7 @@ class MinMaxAvgBarCard extends LitElement {
   }
 
   async _fetchStatsIfNeeded() {
+    if (!this.__isVisible) return;
     const cfg = this._config || {};
     const entity = cfg.entity;
     if (!this.hass || !entity) return;
@@ -890,37 +957,52 @@ class MinMaxAvgBarCard extends LitElement {
 
     if (!shouldFetchMain && !shouldFetchCompare) return;
 
+    const requestKey = `${mainKey}|${compareKey}`;
+    if (this.__pendingFetchKey === requestKey) return;
+    const requestId = ++this.__fetchRequestId;
+    this.__pendingFetchKey = requestKey;
+
     this._loading = true;
     this._err = null;
 
     try {
-      if (shouldFetchMain) {
-        const fullTimeline = await this._fetchStatsForRange(entity, startIso, endIso, fetchPeriod, cfg);
+      const mainPromise = shouldFetchMain
+        ? this._fetchStatsForRange(entity, startIso, endIso, fetchPeriod, cfg)
+        : Promise.resolve(null);
+      const comparePromise = compareRange && shouldFetchCompare
+        ? this._fetchStatsForRange(entity, compareRange.startIso, compareRange.endIso, fetchPeriod, cfg)
+            .then((data) => ({ data, error: null }))
+            .catch((error) => ({ data: null, error }))
+        : Promise.resolve(null);
+      const [fullTimeline, compareResult] = await Promise.all([mainPromise, comparePromise]);
+      if (requestId !== this.__fetchRequestId) return;
+
+      if (fullTimeline) {
         this._data = fullTimeline;
         this.__lastFetchKey = mainKey;
       }
 
-      if (compareRange && compareRange.startIso === startIso && compareRange.endIso === endIso) {
-        this._compareData = null;
-        this.__lastCompareFetchKey = "";
-      } else if (compareRange && shouldFetchCompare) {
-        try {
-          const compareTimeline = await this._fetchStatsForRange(entity, compareRange.startIso, compareRange.endIso, fetchPeriod, cfg);
-          this._compareData = compareTimeline;
-          this.__lastCompareFetchKey = compareKey;
-        } catch (e) {
+      if (compareResult) {
+        if (compareResult.error) {
           this._compareData = null;
           this.__lastCompareFetchKey = "";
-          console.warn("[MMAB] compare fetch error", e);
+          console.warn("[MMAB] compare fetch error", compareResult.error);
+        } else {
+          this._compareData = compareResult.data;
+          this.__lastCompareFetchKey = compareKey;
         }
       } else if (!compareRange) {
         this._compareData = null;
         this.__lastCompareFetchKey = "";
       }
 
+      if (requestId !== this.__fetchRequestId) return;
+      this.__pendingFetchKey = "";
       this._loading = false;
       this.requestUpdate();
     } catch (e) {
+      if (requestId !== this.__fetchRequestId) return;
+      this.__pendingFetchKey = "";
       this._loading = false;
       this._err = String(e?.message || e);
       console.warn("[MMAB] fetch error", e);
@@ -947,20 +1029,46 @@ class MinMaxAvgBarCard extends LitElement {
     return { x0, y0, plotW, plotH, n, barStep, barW, barXPad };
   }
 
-  _onMove(ev, geom) {
-    if (!geom || !Array.isArray(this._data) || !this._data.length) return;
+  _onMove(ev) {
+    if (!Array.isArray(this._data) || !this._data.length) return;
+    let pointerGeometry = this.__pointerGeometry;
+    if (!pointerGeometry) {
+      const rect = ev.currentTarget.getBoundingClientRect();
+      const W = Math.max(500, this._size?.w || rect.width);
+      pointerGeometry = {
+        rect,
+        scaleX: W / rect.width,
+        plot: this._computePlotGeometry(W, Math.max(240, this._size?.h || rect.height)),
+      };
+      this.__pointerGeometry = pointerGeometry;
+    }
+    const geom = pointerGeometry.rect;
     const x = ev.clientX - geom.left;
     const y = ev.clientY - geom.top;
-    const W = Math.max(500, this._size?.w || geom.width);
-    const sx = (W / geom.width);
-    const X = x * sx;
-    const plot = this._computePlotGeometry(W, Math.max(240, this._size?.h || geom.height));
+    const X = x * pointerGeometry.scaleX;
+    const plot = pointerGeometry.plot;
     const { x0, plotW, n, barStep } = plot;
     if (X < x0 || X > x0 + plotW) { this._hover = null; return; }
     const idx = clamp(Math.floor((X - x0) / barStep), 0, n - 1);
+    if (this._hover?.idx === idx) {
+      this._hover.px = x;
+      this._hover.py = y;
+      const tooltip = this.__tooltipElement?.isConnected
+        ? this.__tooltipElement
+        : (this.__tooltipElement = this.renderRoot?.querySelector(".tooltip"));
+      if (tooltip) {
+        tooltip.style.left = `${x}px`;
+        tooltip.style.top = `${y}px`;
+      }
+      return;
+    }
     this._hover = { idx, px: x, py: y };
   }
-  _onLeave() { this._hover = null; }
+  _onLeave() {
+    this.__pointerGeometry = null;
+    this.__tooltipElement = null;
+    this._hover = null;
+  }
 
   render() {
     const cfg = this._config || {};
@@ -968,10 +1076,13 @@ class MinMaxAvgBarCard extends LitElement {
     const dateFmt = (cfg.date_format || "eu").toLowerCase();
     const i18n = STRINGS[lang] || STRINGS.cs;
     if (!cfg.entity) return html`<ha-card><div class="wrap"><div class="err">${i18n.missing}</div></div></ha-card>`;
+    const height = Number(cfg.height || 320);
+    if (!this.__isVisible) {
+      return html`<ha-card aria-hidden="true"><div style="height:${height + 68}px"></div></ha-card>`;
+    }
     const st = this._stateObj(cfg.entity);
     const unit = this._unit(cfg.entity);
     const title = cfg.name || (st?.attributes?.friendly_name ?? cfg.entity);
-    const height = Number(cfg.height || 320);
     const decimals = Number.isFinite(Number(cfg.decimals)) ? Number(cfg.decimals) : 1;
 
     const data = Array.isArray(this._data) ? this._data : [];
@@ -1057,9 +1168,13 @@ class MinMaxAvgBarCard extends LitElement {
     const fmtVal = (v) => (isFinite(v) ? Number(v).toFixed(decimals) : "–");
 
     // Pass explicit thresholds and color_by setting
-    const activeThresholds = Array.isArray(cfg.thresholds) ? cfg.thresholds : PRESETS.temperature;
+    const activeThresholds = this.__activeThresholds;
     const colorBy = ["max", "average", "min"].includes(cfg.color_by) ? cfg.color_by : "max";
     const useGradientFill = cfg.bar_color_mode === "gradient";
+    const chartGradientStops = useGradientFill
+      ? gradientStopsForRange(ticksInfo.min, ticksInfo.max, activeThresholds)
+      : [];
+    const gradientFill = chartGradientStops.length ? "url(#mmab-chart-gradient)" : null;
 
     return html`
       <ha-card>
@@ -1090,9 +1205,17 @@ class MinMaxAvgBarCard extends LitElement {
           ${this._err ? html`<div class="err">${this._err}</div>` : nothing}
 
           <div class="chart"
-               @mousemove=${(e) => this._onMove(e, e.currentTarget.getBoundingClientRect())}
-               @mouseleave=${() => this._onLeave()}>
+               @mousemove=${this._onMove}
+               @mouseleave=${this._onLeave}>
             <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Min max avg bar chart">
+              ${gradientFill ? svg`
+                <defs>
+                  <linearGradient id="mmab-chart-gradient" gradientUnits="userSpaceOnUse"
+                                  x1="0" y1="${yFor(ticksInfo.min)}" x2="0" y2="${yFor(ticksInfo.max)}">
+                    ${chartGradientStops.map((s) => svg`<stop offset="${s.offset}%" stop-color="${s.color}"></stop>`)}
+                  </linearGradient>
+                </defs>
+              ` : nothing}
               ${showYUnit && unit ? svg`<text class="yUnit" x="${x0 - 5}" y="${y0 - 6}" text-anchor="end">${unit}</text>` : nothing}
 
               ${ticksInfo.ticks.map((t, idx) => {
@@ -1130,22 +1253,12 @@ class MinMaxAvgBarCard extends LitElement {
                 const h = Math.max(2, yBot - yTop);
                 const rx = Number(cfg.bar_radius ?? 4);
                 const avgY = (avgV == null) ? null : yFor(avgV);
-                const gradId = `mmab-compare-grad-${i}`;
-                const fill = useGradientFill ? `url(#${gradId})` : color;
-                const stops = useGradientFill ? gradientStopsForRange(minV, maxV, activeThresholds) : [];
+                const fill = gradientFill || color;
 
                 return svg`
-                  ${useGradientFill && stops.length ? svg`
-                    <defs>
-                      <linearGradient id="${gradId}" gradientUnits="userSpaceOnUse" x1="0" y1="${yBot}" x2="0" y2="${yTop}">
-                        ${stops.map((s) => svg`<stop offset="${s.offset}%" stop-color="${s.color}"></stop>`)}
-                      </linearGradient>
-                    </defs>
-                  ` : nothing}
-                  <rect class="compareFill" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${fill}" rx="${rx}" ry="${rx}"></rect>
-                  <rect class="compareStroke" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
+                  <rect class="compareBar" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}"
+                        fill="${fill}" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
                   ${avgY == null ? nothing : svg`
-                    <line class="avgShadowCompare" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
                     <line class="avgLineCompare" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
                   `}
                 `;
@@ -1168,22 +1281,12 @@ class MinMaxAvgBarCard extends LitElement {
                 const rx = Number(cfg.bar_radius ?? 4);
                 const avgY = (avgV == null) ? null : yFor(avgV);
                 const isActive = hover && hover.idx === i;
-                const gradId = `mmab-main-grad-${i}`;
-                const fill = useGradientFill ? `url(#${gradId})` : color;
-                const stops = useGradientFill ? gradientStopsForRange(minV, maxV, activeThresholds) : [];
+                const fill = gradientFill || color;
 
                 return svg`
-                  ${useGradientFill && stops.length ? svg`
-                    <defs>
-                      <linearGradient id="${gradId}" gradientUnits="userSpaceOnUse" x1="0" y1="${yBot}" x2="0" y2="${yTop}">
-                        ${stops.map((s) => svg`<stop offset="${s.offset}%" stop-color="${s.color}"></stop>`)}
-                      </linearGradient>
-                    </defs>
-                  ` : nothing}
-                  <rect class="barFill ${isActive ? 'active' : ''}" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="${fill}" rx="${rx}" ry="${rx}"></rect>
-                  <rect class="barStroke" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}" fill="none" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
+                  <rect class="bar ${isActive ? 'active' : ''}" x="${bx}" y="${yTop}" width="${slotBarW}" height="${h}"
+                        fill="${fill}" stroke="${color}" rx="${rx}" ry="${rx}"></rect>
                   ${avgY == null ? nothing : svg`
-                    <line class="avgShadow" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
                     <line class="avgLine" x1="${bx + 2}" y1="${avgY}" x2="${bx + slotBarW - 2}" y2="${avgY}"></line>
                   `}
                 `;
