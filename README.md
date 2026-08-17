@@ -65,7 +65,7 @@ When testing from this Home Assistant instance:
    - `_dev/minmax-avg-bar-card/minmax-avg-bar-card.js`
    - `/config/www/minmax-avg-bar-card.js` if the top-level local resource is used
 2. Always update the Dashboard resource URL cache version in **Settings → Dashboards → Resources** after copying.
-   - Example: `/local/_dev/minmax-avg-bar-card/minmax-avg-bar-card.js?v=1.3.5`
+   - Example: `/local/_dev/minmax-avg-bar-card/minmax-avg-bar-card.js?v=1.3.6`
 3. If the resource is edited through `.storage/lovelace_resources`, create a timestamped backup first.
 4. Hard-refresh the browser or clear the Companion App frontend cache.
 5. Verify the browser console shows the expected `MMAB` version.
@@ -217,6 +217,18 @@ debug: false
 *   Threshold colors are selected by comparing the active `color_by` value to `lt` ranges. The active value can be switched from the card header.
 *   Trailing history (`use_trailing`) shows rolling periods instead of calendar bins (e.g., last 7 days).
 *   `trailing_periods` controls how many bins are shown per period.
+
+## Development
+
+The HACS artifact is generated from `minmax-avg-bar-card_src.js` and should not be edited directly.
+
+```bash
+npm ci
+npm run build
+npm run verify
+```
+
+`npm run verify` checks both modules and confirms that the committed artifact matches the source.
 
 ## Changelog
 
